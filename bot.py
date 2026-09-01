@@ -61,7 +61,7 @@ def _generate_speech_sync(text: str) -> bytes:
 async def cmd_start(message: Message):
     await message.answer(
         "\U0001F916 AkoAI — matnni o'zbekcha ovozga aylantiruvchi bot\n\n"
-        "Menga istalgan matnni yozing, men uni ovozli xabar qilib qaytaraman.\n\n"
+        "Menga istalgan matnni yozing, men uni mp3 audio fayl qilib qaytaraman.\n\n"
         f"Bir martada {MAX_CHARS} belgigacha matn qabul qilaman."
     )
 
@@ -80,7 +80,7 @@ async def handle_text(message: Message):
 
     if len(text) > MAX_CHARS:
         await message.answer(
-            f"\u26A0\uFE0F Matn juda uzun ({len(text)} belgi). "
+            f"⚠️ Matn juda uzun ({len(text)} belgi). "
             f"Iltimos, {MAX_CHARS} belgidan qisqaroq matn yuboring."
         )
         return
@@ -92,16 +92,16 @@ async def handle_text(message: Message):
             asyncio.to_thread(_generate_speech_sync, text), timeout=60
         )
     except asyncio.TimeoutError:
-        await status.edit_text("\u274C Vaqt tugadi, birozdan keyin qayta urinib ko'ring.")
+        await status.edit_text("❌ Vaqt tugadi, birozdan keyin qayta urinib ko'ring.")
         return
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="ignore")
         log.warning(f"ElevenLabs xato: {e.code} {body}")
-        await status.edit_text("\u274C Ovoz yaratib bo'lmadi. Birozdan keyin qayta urinib ko'ring.")
+        await status.edit_text("❌ Ovoz yaratib bo'lmadi. Birozdan keyin qayta urinib ko'ring.")
         return
     except Exception as e:
         log.error(f"Kutilmagan xato: {e}")
-        await status.edit_text("\u274C Xatolik yuz berdi, birozdan keyin qayta urinib ko'ring.")
+        await status.edit_text("❌ Xatolik yuz berdi, birozdan keyin qayta urinib ko'ring.")
         return
 
     tmp_path = None
@@ -110,7 +110,11 @@ async def handle_text(message: Message):
             tmp.write(audio_bytes)
             tmp_path = tmp.name
 
-        await message.answer_voice(voice=FSInputFile(tmp_path))
+        # Ovozli xabar (doira/voice note) o'rniga oddiy mp3 audio fayl sifatida yuboriladi
+        await message.answer_audio(
+            audio=FSInputFile(tmp_path, filename="AkoAI.mp3"),
+            title="AkoAI",
+        )
         await status.delete()
     finally:
         if tmp_path and os.path.exists(tmp_path):
