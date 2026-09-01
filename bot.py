@@ -216,15 +216,29 @@ async def cmd_clone(message: Message, bot: Bot):
     await message.answer(
         "\U0001F3A4 O'z ovozingizni klonlash uchun menga 20-60 soniyalik ovozli xabar "
         "(yoki audio fayl) yuboring.\n\n"
-        "Aniq, sokin joyda, tabiiy ohangda gapiring — sifat shunga qarab yaxshi bo'ladi."
+        "Aniq, sokin joyda, tabiiy ohangda gapiring — sifat shunga qarab yaxshi bo'ladi.\n\n"
+        "ℹ️ Bot qanday ishlaydi: ovoz namunasini yuborganingizdan so'ng, "
+        "bundan buyon menga yozgan HAR QANDAY matn — sizning shu klonlangan ovozingizda "
+        "audio qilib qaytariladi. Bu holat siz /default buyrug'ini yubormaguningizcha davom etadi."
     )
 
 
 @router.message(F.text == "/default")
 async def cmd_default(message: Message):
-    user_voices.pop(str(message.from_user.id), None)
+    had_clone = user_voices.pop(str(message.from_user.id), None) is not None
     save_user_voices(user_voices)
-    await message.answer("\U0001F501 Standart ovozga qaytdingiz.")
+    if had_clone:
+        await message.answer(
+            "\U0001F501 Standart ovozga qaytdingiz.\n\n"
+            "ℹ️ Bot qanday ishlaydi: bundan buyon yuborgan matningiz standart "
+            "(bot o'zining odatiy) ovozida audio qilib qaytariladi. "
+            "Xohlagan vaqtingizda /clone buyrug'i orqali qayta o'z ovozingizga o'tishingiz mumkin."
+        )
+    else:
+        await message.answer(
+            "ℹ️ Siz hozir ham standart ovozdasiz — klonlangan ovoz ulanmagan edi.\n\n"
+            "O'z ovozingizda gapirtirish uchun /clone buyrug'ini yuboring."
+        )
 
 
 @router.message(F.text.startswith("/"))
