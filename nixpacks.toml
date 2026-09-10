@@ -6,3 +6,5 @@ cmds = ["pip install --break-system-packages -r requirements.txt"]
 
 [start]
 cmd = "python3 bot.py"
+[phases.setup]
+nixPkgs = ["python311", "gcc", "ffmpeg"]
