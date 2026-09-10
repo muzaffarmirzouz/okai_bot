@@ -1,14 +1,18 @@
 """
-AkoAI — matnni o'zbekcha ovozga aylantiruvchi Telegram bot.
-ElevenLabs Text-to-Speech + Voice Cloning API orqali ishlaydi.
+AkoAI — matnni o'zbekcha ovozga aylantiruvchi va YouTube/TikTok videolarni
+o'zbek tiliga dublyaj qiluvchi Telegram bot.
+ElevenLabs Text-to-Speech + Voice Cloning + Dubbing API orqali ishlaydi.
 
 Botdan foydalanish uchun foydalanuvchi @Namanganliklar_uz kanaliga obuna
 bo'lgan bo'lishi shart — aks holda bot ishlamaydi.
 
-BUYRUQLAR:
-  /start   — botni ishga tushirish / yordam
-  /clone   — o'z ovozingizni klonlash (ovozli xabar namunasi orqali)
-  /default — standart ovozga qaytish (klonlangan ovozdan voz kechish)
+BUYRUQLAR / FUNKSIYALAR:
+  /start           — botni ishga tushirish / yordam
+  /clone           — o'z ovozingizni klonlash (ovozli xabar namunasi orqali)
+  /default         — standart ovozga qaytish (klonlangan ovozdan voz kechish)
+  (oddiy matn)     — matn ovozga aylantiriladi (mp3 audio fayl qilib qaytariladi)
+  (YouTube/TikTok link) — 2 daqiqagacha bo'lgan videolar o'zbek tiliga dublyaj
+                     qilib qaytariladi; undan uzun videolar rad etiladi
 
 ENV VARIABLES (Railway -> Variables):
   BOT_TOKEN            — @BotFather bergan token
@@ -18,9 +22,19 @@ ENV VARIABLES (Railway -> Variables):
 MUHIM: Botni @Namanganliklar_uz kanaliga ADMIN qilib qo'shish kerak,
 aks holda obunani tekshirish ishlamaydi (Telegram talabi shunday).
 
-ESLATMA: Klonlangan ovozlar user_voices.json fayliga saqlanadi. Railway'ning
+ESLATMA 1: Klonlangan ovozlar user_voices.json fayliga saqlanadi. Railway'ning
 standart (persistent bo'lmagan) diskida bu fayl har yangi deploy'da o'chib
 ketishi mumkin — doimiy saqlash kerak bo'lsa, Railway Volume ulash tavsiya etiladi.
+
+ESLATMA 2: Dubbing (video tarjima) funksiyasi ElevenLabs kreditlarini oddiy
+Text-to-Speech'ga qaraganda ANCHA ko'proq sarflaydi (video uzunligiga qarab
+bir necha daqiqalik audio narxiga teng) — Creator tarifdagi oylik kredit
+tez tugashi mumkin, ehtiyot bo'ling. Shuning uchun 2 daqiqadan uzun videolar
+avtomatik rad etiladi (kredit sarflanmasdan oldin).
+
+ESLATMA 3: Video davomiyligini aniqlash uchun "yt-dlp" kutubxonasi kerak —
+requirements.txt fayliga "yt-dlp" qatorini qo'shishni unutmang, aks holda
+bot ishga tushmaydi (ImportError).
 """
 import asyncio
 import logging
@@ -31,6 +45,15 @@ import uuid
 import urllib.request
 import urllib.error
 import json
+
+import yt_dlp
+
+# YouTube/TikTok link aniqlash uchun (dublyaj funksiyasi shu link kelganda ishga tushadi)
+VIDEO_URL_REGEX = r"(?i)(youtube\.com/watch\?v=|youtu\.be/|tiktok\.com/)"
+DUBBING_TARGET_LANG = "uz"
+DUBBING_POLL_INTERVAL = 10  # soniya — status necha soniyada bir tekshiriladi
+DUBBING_MAX_WAIT = 600  # soniya — maksimal necha soniya kutiladi (10 daqiqa)
+DUBBING_MAX_SECONDS = 120  # 2 daqiqadan uzun videolar rad etiladi
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
@@ -153,6 +176,71 @@ def _clone_voice_sync(name: str, audio_bytes: bytes, filename: str) -> str:
         return data["voice_id"]
 
 
+def _get_video_duration_sync(url: str) -> float | None:
+    """Videoni yuklab olmasdan, uning davomiyligini (soniyalarda) aniqlaydi.
+    Aniqlab bo'lmasa (masalan live efir) None qaytaradi."""
+    ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+        return info.get("duration")
+
+
+def _start_dubbing_sync(source_url: str) -> str:
+    """ElevenLabs Dubbing API'ga video linkini yuborib, dubbing_id qaytaradi
+    (bloklaydigan/sinxron — alohida threadda ishga tushiriladi)."""
+    boundary = uuid.uuid4().hex
+    body = bytearray()
+
+    def add_field(field_name: str, value: str):
+        body.extend(
+            (
+                f'--{boundary}\r\n'
+                f'Content-Disposition: form-data; name="{field_name}"\r\n\r\n'
+                f'{value}\r\n'
+            ).encode("utf-8")
+        )
+
+    add_field("source_url", source_url)
+    add_field("target_lang", DUBBING_TARGET_LANG)
+    add_field("source_lang", "auto")
+    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+
+    req = urllib.request.Request(
+        "https://api.elevenlabs.io/v1/dubbing",
+        data=bytes(body),
+        headers={
+            "xi-api-key": ELEVENLABS_API_KEY,
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+        return data["dubbing_id"]
+
+
+def _check_dubbing_status_sync(dubbing_id: str) -> dict:
+    """Dublyaj holatini tekshiradi: status "dubbing" | "dubbed" | "failed" bo'lishi mumkin."""
+    req = urllib.request.Request(
+        f"https://api.elevenlabs.io/v1/dubbing/{dubbing_id}",
+        headers={"xi-api-key": ELEVENLABS_API_KEY},
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _download_dubbed_media_sync(dubbing_id: str, lang: str) -> bytes:
+    """Tayyor bo'lgan dublyaj qilingan video/audio faylini yuklab oladi."""
+    req = urllib.request.Request(
+        f"https://api.elevenlabs.io/v1/dubbing/{dubbing_id}/audio/{lang}",
+        headers={"xi-api-key": ELEVENLABS_API_KEY},
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        return resp.read()
+
+
 async def is_subscribed(bot: Bot, user_id: int) -> bool:
     """Foydalanuvchi CHANNEL_USERNAME kanaliga obuna bo'lganini tekshiradi.
     Bot shu kanalda ADMIN bo'lishi shart, aks holda Telegram xato qaytaradi."""
@@ -185,7 +273,10 @@ WELCOME_TEXT = (
     "\U0001F916 AkoAI — matnni ovozga aylantiruvchi bot\n\n"
     "Menga istalgan matnni yozing, men uni mp3 audio fayl qilib qaytaraman.\n\n"
     f"Bir martada {MAX_CHARS} belgigacha matn qabul qilaman.\n\n"
-    "\U0001F3A4 O'z ovozingizda gapirtirishni xohlasangiz — /clone buyrug'ini yuboring."
+    "\U0001F3A4 O'z ovozingizda gapirtirishni xohlasangiz — /clone buyrug'ini yuboring.\n\n"
+    "\U0001F3AC YouTube yoki TikTok video linkini yuborsangiz, uni o'zbek tiliga "
+    f"dublyaj qilib qaytaraman ({DUBBING_MAX_SECONDS // 60} daqiqagacha bo'lgan "
+    "videolar uchun, bir necha daqiqa vaqt olishi mumkin)."
 )
 
 
@@ -289,6 +380,122 @@ async def handle_voice_sample(message: Message, bot: Bot):
     except Exception as e:
         log.error(f"Kutilmagan xato (voice cloning): {e}")
         await status.edit_text("❌ Xatolik yuz berdi, birozdan keyin qayta urinib ko'ring.")
+
+
+@router.message(F.text.regexp(VIDEO_URL_REGEX))
+async def handle_video_dub(message: Message, bot: Bot):
+    if not await is_subscribed(bot, message.from_user.id):
+        await message.answer(SUBSCRIBE_TEXT, reply_markup=subscribe_keyboard())
+        return
+
+    url = message.text.strip()
+    status = await message.answer("\U0001F50D Video tekshirilmoqda...")
+
+    try:
+        duration = await asyncio.to_thread(_get_video_duration_sync, url)
+    except Exception as e:
+        log.warning(f"Video davomiyligini aniqlashda xato: {e}")
+        await status.edit_text(
+            "❌ Videoni ochib bo'lmadi. Link to'g'riligini va videoning ochiq "
+            "(public) ekanligini tekshiring."
+        )
+        return
+
+    if duration is None:
+        await status.edit_text(
+            "❌ Videoning davomiyligini aniqlab bo'lmadi (masalan, live efir bo'lishi mumkin). "
+            "Boshqa video bilan urinib ko'ring."
+        )
+        return
+
+    if duration > DUBBING_MAX_SECONDS:
+        mins = int(duration // 60)
+        secs = int(duration % 60)
+        await status.edit_text(
+            f"⚠️ Bu video {mins} daqiqa {secs} soniya — juda uzun.\n\n"
+            f"Men faqat {DUBBING_MAX_SECONDS // 60} daqiqagacha bo'lgan videolarni "
+            "dublyaj qila olaman. Qisqaroq video yuboring."
+        )
+        return
+
+    await status.edit_text(
+        "\U0001F3AC Video yuklanmoqda va o'zbek tiliga dublyaj qilinmoqda...\n"
+        "Bu bir necha daqiqa vaqt olishi mumkin, iltimos kuting."
+    )
+
+    try:
+        dubbing_id = await asyncio.to_thread(_start_dubbing_sync, url)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        log.warning(f"Dubbing boshlashda xato: {e.code} {body}")
+        await status.edit_text(
+            "❌ Videoni qabul qilib bo'lmadi. Link to'g'riligini va videoning ochiq "
+            "(public) ekanligini tekshiring."
+        )
+        return
+    except Exception as e:
+        log.error(f"Kutilmagan xato (dubbing start): {e}")
+        await status.edit_text("❌ Xatolik yuz berdi, birozdan keyin qayta urinib ko'ring.")
+        return
+
+    waited = 0
+    final_status = None
+    while waited < DUBBING_MAX_WAIT:
+        await asyncio.sleep(DUBBING_POLL_INTERVAL)
+        waited += DUBBING_POLL_INTERVAL
+        try:
+            info = await asyncio.to_thread(_check_dubbing_status_sync, dubbing_id)
+        except Exception as e:
+            log.error(f"Dubbing holatini tekshirishda xato: {e}")
+            continue
+        st = info.get("status")
+        if st == "dubbed":
+            final_status = "dubbed"
+            break
+        if st == "failed":
+            final_status = "failed"
+            log.warning(f"Dubbing failed: {info.get('error')}")
+            break
+
+    if final_status != "dubbed":
+        await status.edit_text(
+            "❌ Dublyaj yakunlanmadi (vaqt tugadi yoki xato yuz berdi). "
+            "Qisqaroq video bilan qayta urinib ko'ring."
+        )
+        return
+
+    try:
+        media_bytes = await asyncio.to_thread(
+            _download_dubbed_media_sync, dubbing_id, DUBBING_TARGET_LANG
+        )
+    except Exception as e:
+        log.error(f"Dublyajni yuklab olishda xato: {e}")
+        await status.edit_text("❌ Tayyor faylni yuklab bo'lmadi.")
+        return
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp.write(media_bytes)
+            tmp_path = tmp.name
+
+        try:
+            await message.answer_video(video=FSInputFile(tmp_path, filename="dublyaj.mp4"))
+        except Exception:
+            # Manba audio bo'lsa (video emas), audio fayl sifatida yuboramiz
+            await message.answer_audio(
+                audio=FSInputFile(tmp_path, filename="dublyaj.mp3"), title="Dublyaj"
+            )
+        await status.delete()
+    except Exception as e:
+        log.error(f"Faylni yuborishda xato: {e}")
+        await status.edit_text(
+            "❌ Tayyor faylni yuborib bo'lmadi (fayl juda katta bo'lishi mumkin — "
+            "Telegram bot orqali yuborish uchun 50MB limit bor)."
+        )
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 @router.message(F.text)
