@@ -39,6 +39,7 @@ bot ishga tushmaydi (ImportError).
 import asyncio
 import logging
 import os
+import re
 import tempfile
 import uuid
 
@@ -49,7 +50,11 @@ import json
 import yt_dlp
 
 # YouTube/TikTok link aniqlash uchun (dublyaj funksiyasi shu link kelganda ishga tushadi)
-VIDEO_URL_REGEX = r"(?i)(youtube\.com/watch\?v=|youtu\.be/|tiktok\.com/)"
+# re.search bilan ishlatiladi, shuning uchun link matnning istalgan joyida
+# ("https://www.youtube.com/..." kabi, boshida turmasa ham) topiladi.
+VIDEO_URL_REGEX = re.compile(
+    r"(youtube\.com/watch\?v=|youtu\.be/|tiktok\.com/)", re.IGNORECASE
+)
 DUBBING_TARGET_LANG = "uz"
 DUBBING_POLL_INTERVAL = 10  # soniya — status necha soniyada bir tekshiriladi
 DUBBING_MAX_WAIT = 600  # soniya — maksimal necha soniya kutiladi (10 daqiqa)
@@ -382,7 +387,7 @@ async def handle_voice_sample(message: Message, bot: Bot):
         await status.edit_text("❌ Xatolik yuz berdi, birozdan keyin qayta urinib ko'ring.")
 
 
-@router.message(F.text.regexp(VIDEO_URL_REGEX))
+@router.message(F.text.func(lambda t: VIDEO_URL_REGEX.search(t) is not None))
 async def handle_video_dub(message: Message, bot: Bot):
     if not await is_subscribed(bot, message.from_user.id):
         await message.answer(SUBSCRIBE_TEXT, reply_markup=subscribe_keyboard())
