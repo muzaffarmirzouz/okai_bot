@@ -6,13 +6,18 @@ ElevenLabs Text-to-Speech + Voice Cloning + Dubbing API orqali ishlaydi.
 Botdan foydalanish uchun foydalanuvchi @Namanganliklar_uz kanaliga obuna
 bo'lgan bo'lishi shart — aks holda bot ishlamaydi.
 
+Foydalanuvchi ikkita rejim orasida tugmalar orqali tanlov qiladi ("🔊 Textni
+audio qilish" / "🎬 Video tarjima") — shu tufayli link yoki matn noto'g'ri
+rejimda ishlab ketmaydi.
+
 BUYRUQLAR / FUNKSIYALAR:
-  /start           — botni ishga tushirish / yordam
+  /start           — botni ishga tushirish, rejim tanlash tugmalari chiqadi
+  /menu            — rejimni istalgan vaqtda qayta tanlash
   /clone           — o'z ovozingizni klonlash (ovozli xabar namunasi orqali)
   /default         — standart ovozga qaytish (klonlangan ovozdan voz kechish)
-  (oddiy matn)     — matn ovozga aylantiriladi (mp3 audio fayl qilib qaytariladi)
-  (YouTube/TikTok link) — 2 daqiqagacha bo'lgan videolar o'zbek tiliga dublyaj
-                     qilib qaytariladi; undan uzun videolar rad etiladi
+  "🔊 Textni audio qilish" rejimida — matn ovozga aylantiriladi (mp3 fayl)
+  "🎬 Video tarjima" rejimida — YouTube/TikTok linki (2 daqiqagacha) o'zbek
+                     tiliga dublyaj qilinadi; undan uzun videolar rad etiladi
 
 ENV VARIABLES (Railway -> Variables):
   BOT_TOKEN            — @BotFather bergan token
@@ -53,7 +58,8 @@ import yt_dlp
 # re.search bilan ishlatiladi, shuning uchun link matnning istalgan joyida
 # ("https://www.youtube.com/..." kabi, boshida turmasa ham) topiladi.
 VIDEO_URL_REGEX = re.compile(
-    r"(youtube\.com/watch\?v=|youtu\.be/|tiktok\.com/)", re.IGNORECASE
+    r"(youtube\.com/watch\?v=|youtube\.com/shorts/|youtu\.be/|tiktok\.com/)",
+    re.IGNORECASE,
 )
 DUBBING_TARGET_LANG = "uz"
 DUBBING_POLL_INTERVAL = 10  # soniya — status necha soniyada bir tekshiriladi
@@ -94,6 +100,10 @@ router = Router()
 
 # /clone buyrug'idan keyin ovoz namunasi kutilayotgan foydalanuvchilar
 pending_clone: set[int] = set()
+
+# Foydalanuvchining tanlagan rejimi: "tts" (matn -> ovoz) yoki "dub" (video tarjima)
+# Standart holat — "tts"
+user_mode: dict[int, str] = {}
 
 
 def load_user_voices() -> dict:
@@ -275,14 +285,37 @@ SUBSCRIBE_TEXT = (
 )
 
 WELCOME_TEXT = (
-    "\U0001F916 AkoAI — matnni ovozga aylantiruvchi bot\n\n"
-    "Menga istalgan matnni yozing, men uni mp3 audio fayl qilib qaytaraman.\n\n"
+    "\U0001F916 AkoAI botiga xush kelibsiz!\n\n"
+    "Men ikki xil ishni qila olaman:\n"
+    "\U0001F50A Textni audio qilish — matningizni mp3 ovozga aylantiraman.\n"
+    "\U0001F3AC Video tarjima — YouTube/TikTok videosini o'zbek tiliga dublyaj qilaman "
+    f"({DUBBING_MAX_SECONDS // 60} daqiqagacha bo'lgan videolar uchun).\n\n"
+    "Quyidan kerakli rejimni tanlang \U0001F447"
+)
+
+MODE_TTS_TEXT = (
+    "\U0001F50A Rejim: Textni audio qilish\n\n"
+    "Menga istalgan matnni yozing, men uni mp3 audio fayl qilib qaytaraman.\n"
     f"Bir martada {MAX_CHARS} belgigacha matn qabul qilaman.\n\n"
     "\U0001F3A4 O'z ovozingizda gapirtirishni xohlasangiz — /clone buyrug'ini yuboring.\n\n"
-    "\U0001F3AC YouTube yoki TikTok video linkini yuborsangiz, uni o'zbek tiliga "
-    f"dublyaj qilib qaytaraman ({DUBBING_MAX_SECONDS // 60} daqiqagacha bo'lgan "
-    "videolar uchun, bir necha daqiqa vaqt olishi mumkin)."
+    "Boshqa rejimga o'tish uchun /menu buyrug'ini yuboring."
 )
+
+MODE_DUB_TEXT = (
+    "\U0001F3AC Rejim: Video tarjima (Dubbing)\n\n"
+    "Menga YouTube yoki TikTok video linkini yuboring — men uni o'zbek tiliga "
+    f"dublyaj qilib qaytaraman ({DUBBING_MAX_SECONDS // 60} daqiqagacha bo'lgan videolar uchun).\n\n"
+    "Boshqa rejimga o'tish uchun /menu buyrug'ini yuboring."
+)
+
+
+def mode_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="\U0001F50A Textni audio qilish", callback_data="mode_tts")],
+            [InlineKeyboardButton(text="\U0001F3AC Video tarjima", callback_data="mode_dub")],
+        ]
+    )
 
 
 @router.message(F.text == "/start")
@@ -290,16 +323,38 @@ async def cmd_start(message: Message, bot: Bot):
     if not await is_subscribed(bot, message.from_user.id):
         await message.answer(SUBSCRIBE_TEXT, reply_markup=subscribe_keyboard())
         return
-    await message.answer(WELCOME_TEXT)
+    await message.answer(WELCOME_TEXT, reply_markup=mode_keyboard())
+
+
+@router.message(F.text == "/menu")
+async def cmd_menu(message: Message, bot: Bot):
+    if not await is_subscribed(bot, message.from_user.id):
+        await message.answer(SUBSCRIBE_TEXT, reply_markup=subscribe_keyboard())
+        return
+    await message.answer("Qaysi rejimda ishlashni xohlaysiz?", reply_markup=mode_keyboard())
 
 
 @router.callback_query(F.data == "check_sub")
 async def check_sub_callback(callback: CallbackQuery, bot: Bot):
     if await is_subscribed(bot, callback.from_user.id):
-        await callback.message.edit_text(WELCOME_TEXT)
+        await callback.message.edit_text(WELCOME_TEXT, reply_markup=mode_keyboard())
         await callback.answer("✅ Obuna tasdiqlandi!")
     else:
         await callback.answer("❌ Siz hali kanalga obuna bo'lmagansiz.", show_alert=True)
+
+
+@router.callback_query(F.data == "mode_tts")
+async def set_mode_tts(callback: CallbackQuery):
+    user_mode[callback.from_user.id] = "tts"
+    await callback.message.edit_text(MODE_TTS_TEXT)
+    await callback.answer("🔊 Textni audio qilish rejimi tanlandi")
+
+
+@router.callback_query(F.data == "mode_dub")
+async def set_mode_dub(callback: CallbackQuery):
+    user_mode[callback.from_user.id] = "dub"
+    await callback.message.edit_text(MODE_DUB_TEXT)
+    await callback.answer("🎬 Video tarjima rejimi tanlandi")
 
 
 @router.message(F.text == "/clone")
@@ -387,13 +442,7 @@ async def handle_voice_sample(message: Message, bot: Bot):
         await status.edit_text("❌ Xatolik yuz berdi, birozdan keyin qayta urinib ko'ring.")
 
 
-@router.message(F.text.func(lambda t: VIDEO_URL_REGEX.search(t) is not None))
-async def handle_video_dub(message: Message, bot: Bot):
-    if not await is_subscribed(bot, message.from_user.id):
-        await message.answer(SUBSCRIBE_TEXT, reply_markup=subscribe_keyboard())
-        return
-
-    url = message.text.strip()
+async def do_dubbing(message: Message, url: str) -> None:
     status = await message.answer("\U0001F50D Video tekshirilmoqda...")
 
     try:
@@ -503,16 +552,7 @@ async def handle_video_dub(message: Message, bot: Bot):
             os.remove(tmp_path)
 
 
-@router.message(F.text)
-async def handle_text(message: Message, bot: Bot):
-    if not await is_subscribed(bot, message.from_user.id):
-        await message.answer(SUBSCRIBE_TEXT, reply_markup=subscribe_keyboard())
-        return
-
-    text = message.text.strip()
-    if not text:
-        return
-
+async def do_tts(message: Message, text: str) -> None:
     if len(text) > MAX_CHARS:
         await message.answer(
             f"⚠️ Matn juda uzun ({len(text)} belgi). "
@@ -556,6 +596,41 @@ async def handle_text(message: Message, bot: Bot):
             os.remove(tmp_path)
 
 
+@router.message(F.text)
+async def handle_text(message: Message, bot: Bot):
+    if not await is_subscribed(bot, message.from_user.id):
+        await message.answer(SUBSCRIBE_TEXT, reply_markup=subscribe_keyboard())
+        return
+
+    text = message.text.strip()
+    if not text:
+        return
+
+    mode = user_mode.get(message.from_user.id, "tts")
+    is_video_link = VIDEO_URL_REGEX.search(text) is not None
+
+    if mode == "dub":
+        if not is_video_link:
+            await message.answer(
+                "⚠️ Siz hozir \U0001F3AC \"Video tarjima\" rejimidasiz — menga YouTube "
+                "yoki TikTok link yuboring.\n\n"
+                "Boshqa rejimga o'tish uchun /menu buyrug'ini yuboring."
+            )
+            return
+        await do_dubbing(message, text)
+        return
+
+    # mode == "tts"
+    if is_video_link:
+        await message.answer(
+            "⚠️ Siz hozir \U0001F50A \"Textni audio qilish\" rejimidasiz.\n\n"
+            "Bu linkni video tarjima qilishimni xohlasangiz, /menu orqali "
+            "\U0001F3AC \"Video tarjima\" rejimiga o'ting."
+        )
+        return
+    await do_tts(message, text)
+
+
 async def main():
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=None))
     dp = Dispatcher()
@@ -563,6 +638,7 @@ async def main():
 
     await bot.set_my_commands([
         BotCommand(command="start", description="Botni ishga tushirish / yordam"),
+        BotCommand(command="menu", description="Rejimni tanlash (Text/Video)"),
         BotCommand(command="clone", description="O'z ovozingizni klonlash"),
         BotCommand(command="default", description="Standart ovozga qaytish"),
     ])
