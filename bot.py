@@ -31,20 +31,29 @@ ESLATMA 1: Klonlangan ovozlar user_voices.json fayliga saqlanadi. Railway'ning
 standart (persistent bo'lmagan) diskida bu fayl har yangi deploy'da o'chib
 ketishi mumkin — doimiy saqlash kerak bo'lsa, Railway Volume ulash tavsiya etiladi.
 
-ESLATMA 2: Dubbing (video tarjima) funksiyasi ElevenLabs kreditlarini oddiy
-Text-to-Speech'ga qaraganda ANCHA ko'proq sarflaydi (video uzunligiga qarab
-bir necha daqiqalik audio narxiga teng) — Creator tarifdagi oylik kredit
-tez tugashi mumkin, ehtiyot bo'ling. Shuning uchun 2 daqiqadan uzun videolar
-avtomatik rad etiladi (kredit sarflanmasdan oldin).
+ESLATMA 2: ElevenLabs'ning tayyor Dubbing API'si o'zbek tilini target sifatida
+QO'LLAB-QUVVATLAMAYDI ("Target language 'uz' is not supported"). Shuning uchun
+video tarjima o'z pipeline'imiz orqali qilinadi: video yuklab olinadi (yt-dlp)
+-> nutq matnga aylantiriladi (ElevenLabs Speech-to-Text) -> matn o'zbek tiliga
+tarjima qilinadi (deep-translator / Google Translate) -> tarjima ElevenLabs
+Text-to-Speech orqali ovozga aylantiriladi -> yangi ovoz videoga ffmpeg bilan
+qayta joylanadi. Natijada lab-sync mukammal bo'lmasligi mumkin (audio uzunligi
+original video bilan aynan mos kelmasligi mumkin).
 
-ESLATMA 3: Video davomiyligini aniqlash uchun "yt-dlp" kutubxonasi kerak —
-requirements.txt fayliga "yt-dlp" qatorini qo'shishni unutmang, aks holda
-bot ishga tushmaydi (ImportError).
+ESLATMA 3: Bir nechta tashqi vosita kerak:
+  - requirements.txt fayliga "yt-dlp" va "deep-translator" qatorlarini qo'shing
+  - nixpacks.toml fayldagi nixPkgs ro'yxatiga "ffmpeg" ni qo'shing
+  Bularsiz bot ishga tushmaydi yoki dublyaj funksiyasi ishlamaydi.
+
+ESLATMA 4: Dublyaj funksiyasi ElevenLabs kreditlarini oddiy Text-to-Speech'ga
+qaraganda ko'proq sarflaydi (Speech-to-Text + Text-to-Speech ikkalasi ham
+ishlatiladi) — shuning uchun 2 daqiqadan uzun videolar avtomatik rad etiladi.
 """
 import asyncio
 import logging
 import os
 import re
+import subprocess
 import tempfile
 import uuid
 
@@ -53,6 +62,7 @@ import urllib.error
 import json
 
 import yt_dlp
+from deep_translator import GoogleTranslator
 
 # YouTube/TikTok link aniqlash uchun (dublyaj funksiyasi shu link kelganda ishga tushadi)
 # re.search bilan ishlatiladi, shuning uchun link matnning istalgan joyida
@@ -61,9 +71,6 @@ VIDEO_URL_REGEX = re.compile(
     r"(youtube\.com/watch\?v=|youtube\.com/shorts/|youtu\.be/|tiktok\.com/)",
     re.IGNORECASE,
 )
-DUBBING_TARGET_LANG = "uz"
-DUBBING_POLL_INTERVAL = 10  # soniya — status necha soniyada bir tekshiriladi
-DUBBING_MAX_WAIT = 600  # soniya — maksimal necha soniya kutiladi (10 daqiqa)
 DUBBING_MAX_SECONDS = 120  # 2 daqiqadan uzun videolar rad etiladi
 
 from aiogram import Bot, Dispatcher, Router, F
@@ -200,10 +207,26 @@ def _get_video_duration_sync(url: str) -> float | None:
         return info.get("duration")
 
 
-def _start_dubbing_sync(source_url: str) -> str:
-    """ElevenLabs Dubbing API'ga video linkini yuborib, dubbing_id qaytaradi
+def _download_video_sync(url: str, output_path: str) -> None:
+    """Videoni (audio bilan birga) berilgan fayl yo'liga yuklab oladi."""
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "format": "best[ext=mp4]/best",
+        "outtmpl": output_path,
+        "overwrites": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+
+def _transcribe_video_sync(file_path: str) -> str:
+    """ElevenLabs Speech-to-Text orqali video/audio faylni matnga aylantiradi
     (bloklaydigan/sinxron — alohida threadda ishga tushiriladi)."""
     boundary = uuid.uuid4().hex
+    with open(file_path, "rb") as f:
+        file_bytes = f.read()
+
     body = bytearray()
 
     def add_field(field_name: str, value: str):
@@ -215,13 +238,20 @@ def _start_dubbing_sync(source_url: str) -> str:
             ).encode("utf-8")
         )
 
-    add_field("source_url", source_url)
-    add_field("target_lang", DUBBING_TARGET_LANG)
-    add_field("source_lang", "auto")
+    add_field("model_id", "scribe_v1")
+    body.extend(
+        (
+            f'--{boundary}\r\n'
+            f'Content-Disposition: form-data; name="file"; filename="input.mp4"\r\n'
+            f'Content-Type: application/octet-stream\r\n\r\n'
+        ).encode("utf-8")
+    )
+    body.extend(file_bytes)
+    body.extend(b"\r\n")
     body.extend(f"--{boundary}--\r\n".encode("utf-8"))
 
     req = urllib.request.Request(
-        "https://api.elevenlabs.io/v1/dubbing",
+        "https://api.elevenlabs.io/v1/speech-to-text",
         data=bytes(body),
         headers={
             "xi-api-key": ELEVENLABS_API_KEY,
@@ -229,31 +259,41 @@ def _start_dubbing_sync(source_url: str) -> str:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-        return data["dubbing_id"]
-
-
-def _check_dubbing_status_sync(dubbing_id: str) -> dict:
-    """Dublyaj holatini tekshiradi: status "dubbing" | "dubbed" | "failed" bo'lishi mumkin."""
-    req = urllib.request.Request(
-        f"https://api.elevenlabs.io/v1/dubbing/{dubbing_id}",
-        headers={"xi-api-key": ELEVENLABS_API_KEY},
-        method="GET",
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def _download_dubbed_media_sync(dubbing_id: str, lang: str) -> bytes:
-    """Tayyor bo'lgan dublyaj qilingan video/audio faylini yuklab oladi."""
-    req = urllib.request.Request(
-        f"https://api.elevenlabs.io/v1/dubbing/{dubbing_id}/audio/{lang}",
-        headers={"xi-api-key": ELEVENLABS_API_KEY},
-        method="GET",
-    )
     with urllib.request.urlopen(req, timeout=120) as resp:
-        return resp.read()
+        data = json.loads(resp.read().decode("utf-8"))
+        return data.get("text", "")
+
+
+def _translate_to_uzbek_sync(text: str) -> str:
+    """Matnni o'zbek tiliga tarjima qiladi (deep-translator / Google Translate orqali).
+    Uzun matn bo'laklarga bo'lib tarjima qilinadi."""
+    chunks = [text[i:i + 4500] for i in range(0, len(text), 4500)] or [text]
+    translated_parts = [
+        GoogleTranslator(source="auto", target="uz").translate(chunk) for chunk in chunks
+    ]
+    return " ".join(p for p in translated_parts if p)
+
+
+def _mux_audio_into_video_sync(video_path: str, audio_path: str, output_path: str) -> None:
+    """ffmpeg yordamida videoning audio yo'lini yangi (o'zbekcha) audio bilan almashtiradi."""
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-i", audio_path,
+            "-c:v", "copy",
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-shortest",
+            output_path,
+        ],
+        capture_output=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg xato: {result.stderr.decode('utf-8', errors='ignore')[-500:]}"
+        )
 
 
 async def is_subscribed(bot: Bot, user_id: int) -> bool:
@@ -304,7 +344,9 @@ MODE_TTS_TEXT = (
 MODE_DUB_TEXT = (
     "\U0001F3AC Rejim: Video tarjima (Dubbing)\n\n"
     "Menga YouTube yoki TikTok video linkini yuboring — men uni o'zbek tiliga "
-    f"dublyaj qilib qaytaraman ({DUBBING_MAX_SECONDS // 60} daqiqagacha bo'lgan videolar uchun).\n\n"
+    f"tarjima qilib qaytaraman ({DUBBING_MAX_SECONDS // 60} daqiqagacha bo'lgan videolar uchun).\n\n"
+    "Jarayon bir necha bosqichdan iborat (yuklash → matnga aylantirish → tarjima → "
+    "ovoz yaratish → video yig'ish), shuning uchun bir necha daqiqa vaqt olishi mumkin.\n\n"
     "Boshqa rejimga o'tish uchun /menu buyrug'ini yuboring."
 )
 
@@ -472,84 +514,51 @@ async def do_dubbing(message: Message, url: str) -> None:
         )
         return
 
-    await status.edit_text(
-        "\U0001F3AC Video yuklanmoqda va o'zbek tiliga dublyaj qilinmoqda...\n"
-        "Bu bir necha daqiqa vaqt olishi mumkin, iltimos kuting."
-    )
+    video_path = tempfile.mktemp(suffix=".mp4")
+    audio_path = tempfile.mktemp(suffix=".mp3")
+    final_path = tempfile.mktemp(suffix=".mp4")
 
     try:
-        dubbing_id = await asyncio.to_thread(_start_dubbing_sync, url)
+        await status.edit_text("\U0001F4E5 Video yuklab olinmoqda...")
+        await asyncio.to_thread(_download_video_sync, url, video_path)
+
+        await status.edit_text("\U0001F4DD Nutq matnga aylantirilmoqda...")
+        original_text = await asyncio.to_thread(_transcribe_video_sync, video_path)
+        if not original_text.strip():
+            await status.edit_text(
+                "❌ Videoda tushunarli nutq topilmadi (faqat musiqa/shovqin bo'lishi mumkin)."
+            )
+            return
+
+        await status.edit_text("\U0001F1FA\U0001F1FF O'zbek tiliga tarjima qilinmoqda...")
+        translated_text = await asyncio.to_thread(_translate_to_uzbek_sync, original_text)
+
+        await status.edit_text("\U0001F3A4 O'zbekcha ovoz yaratilmoqda...")
+        speech_bytes = await asyncio.to_thread(
+            _generate_speech_sync, translated_text, ELEVENLABS_VOICE_ID
+        )
+        with open(audio_path, "wb") as f:
+            f.write(speech_bytes)
+
+        await status.edit_text("\U0001F3AC Video yig'ilmoqda...")
+        await asyncio.to_thread(_mux_audio_into_video_sync, video_path, audio_path, final_path)
+
+        await message.answer_video(video=FSInputFile(final_path, filename="dublyaj.mp4"))
+        await status.delete()
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="ignore")
-        log.warning(f"Dubbing boshlashda xato: {e.code} {body}")
-        await status.edit_text(
-            "❌ Videoni qabul qilib bo'lmadi. Link to'g'riligini va videoning ochiq "
-            "(public) ekanligini tekshiring."
-        )
-        return
+        log.warning(f"Dublyaj pipeline xato (API): {e.code} {body}")
+        await status.edit_text("❌ Xatolik yuz berdi. Birozdan keyin qayta urinib ko'ring.")
     except Exception as e:
-        log.error(f"Kutilmagan xato (dubbing start): {e}")
-        await status.edit_text("❌ Xatolik yuz berdi, birozdan keyin qayta urinib ko'ring.")
-        return
-
-    waited = 0
-    final_status = None
-    while waited < DUBBING_MAX_WAIT:
-        await asyncio.sleep(DUBBING_POLL_INTERVAL)
-        waited += DUBBING_POLL_INTERVAL
-        try:
-            info = await asyncio.to_thread(_check_dubbing_status_sync, dubbing_id)
-        except Exception as e:
-            log.error(f"Dubbing holatini tekshirishda xato: {e}")
-            continue
-        st = info.get("status")
-        if st == "dubbed":
-            final_status = "dubbed"
-            break
-        if st == "failed":
-            final_status = "failed"
-            log.warning(f"Dubbing failed: {info.get('error')}")
-            break
-
-    if final_status != "dubbed":
+        log.error(f"Dublyaj pipeline xato: {e}")
         await status.edit_text(
-            "❌ Dublyaj yakunlanmadi (vaqt tugadi yoki xato yuz berdi). "
-            "Qisqaroq video bilan qayta urinib ko'ring."
-        )
-        return
-
-    try:
-        media_bytes = await asyncio.to_thread(
-            _download_dubbed_media_sync, dubbing_id, DUBBING_TARGET_LANG
-        )
-    except Exception as e:
-        log.error(f"Dublyajni yuklab olishda xato: {e}")
-        await status.edit_text("❌ Tayyor faylni yuklab bo'lmadi.")
-        return
-
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-            tmp.write(media_bytes)
-            tmp_path = tmp.name
-
-        try:
-            await message.answer_video(video=FSInputFile(tmp_path, filename="dublyaj.mp4"))
-        except Exception:
-            # Manba audio bo'lsa (video emas), audio fayl sifatida yuboramiz
-            await message.answer_audio(
-                audio=FSInputFile(tmp_path, filename="dublyaj.mp3"), title="Dublyaj"
-            )
-        await status.delete()
-    except Exception as e:
-        log.error(f"Faylni yuborishda xato: {e}")
-        await status.edit_text(
-            "❌ Tayyor faylni yuborib bo'lmadi (fayl juda katta bo'lishi mumkin — "
-            "Telegram bot orqali yuborish uchun 50MB limit bor)."
+            "❌ Videoni dublyaj qilib bo'lmadi (fayl juda katta yoki xato yuz berdi bo'lishi mumkin). "
+            "Boshqa video bilan qayta urinib ko'ring."
         )
     finally:
-        if tmp_path and os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        for p in (video_path, audio_path, final_path):
+            if p and os.path.exists(p):
+                os.remove(p)
 
 
 async def do_tts(message: Message, text: str) -> None:
