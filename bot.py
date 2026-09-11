@@ -51,6 +51,7 @@ ishlatiladi) — shuning uchun 2 daqiqadan uzun videolar avtomatik rad etiladi.
 """
 import asyncio
 import base64
+import html
 import logging
 import os
 import re
@@ -142,6 +143,13 @@ CHANNEL_URL = "https://t.me/Namanganliklar_uz"
 # Eleven v3 modelining bitta so'rovdagi belgi chegarasi ~3000. Xavfsizlik
 # uchun biroz kamroq chegara qo'yamiz, aks holda API xato qaytaradi.
 MAX_CHARS = 2800
+
+# ESLATMA: Bepul/norasmiy tarjima xizmatlari (Google Translate scraping, MyMemory)
+# tez-tez limitga tushib qoladi (bir nechta video ketma-ket yuborilganda ayniqsa).
+# Shu sababli, agar GOOGLE_TRANSLATE_API_KEY o'rnatilgan bo'lsa, bot RASMIY Google
+# Cloud Translation API'ni ishlatadi (oyiga 500,000 belgigacha bepul, ancha
+# barqaror). O'rnatilmagan bo'lsa, eski (kamroq ishonchli) bepul usulga qaytadi.
+GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
 
 # Klonlangan ovozlar: {"<user_id>": "<voice_id>"} ko'rinishida saqlanadi
 USER_VOICES_FILE = "user_voices.json"
@@ -369,6 +377,24 @@ def _looks_like_service_error(text: str) -> bool:
     return False
 
 
+def _translate_chunk_official_sync(chunk: str) -> str:
+    """Rasmiy Google Cloud Translation API v2 orqali tarjima qiladi
+    (GOOGLE_TRANSLATE_API_KEY o'rnatilgan bo'lsa ishlatiladi — bepul/norasmiy
+    usullardan ancha barqaror, chunki haqiqiy HTTP xato qaytaradi (masalan
+    limit tugasa) va hech qachon xato xabarini "tarjima" sifatida qaytarmaydi)."""
+    body = json.dumps({"q": chunk, "target": "uz", "format": "text"}).encode("utf-8")
+    req = urllib.request.Request(
+        f"https://translation.googleapis.com/language/translate/v2?key={GOOGLE_TRANSLATE_API_KEY}",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    text = data["data"]["translations"][0]["translatedText"]
+    return html.unescape(text)
+
+
 def _translate_chunk_sync(chunk: str) -> str:
     """Bitta matn bo'lagini o'zbek tiliga tarjima qiladi.
 
@@ -380,6 +406,19 @@ def _translate_chunk_sync(chunk: str) -> str:
     bo'lsa boshqa (zaxira) xizmatga o'tamiz — aks holda video "tarjima
     qilingandek" ko'rinib, aslida asl (masalan inglizcha) matn ovozga
     aylantirilib yuboriladi."""
+    if GOOGLE_TRANSLATE_API_KEY:
+        try:
+            return _translate_chunk_official_sync(chunk)
+        except urllib.error.HTTPError as e:
+            body_text = e.read().decode("utf-8", errors="ignore")
+            log.error(f"Google Cloud Translate API xato: {e.code} {body_text}")
+            raise RuntimeError(f"Google Cloud Translate API xato: {e.code}") from e
+        except Exception as e:
+            log.error(f"Google Cloud Translate API kutilmagan xato: {e}")
+            raise RuntimeError(f"Google Cloud Translate API xato: {e}") from e
+
+    # --- GOOGLE_TRANSLATE_API_KEY o'rnatilmagan bo'lsa, eski (kamroq ishonchli)
+    # bepul/norasmiy usulga qaytamiz ---
     last_error: Exception | None = None
 
     for attempt in range(3):
