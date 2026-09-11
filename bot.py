@@ -322,10 +322,13 @@ def _get_whisper_model():
     return _whisper_model
 
 
-def _transcribe_video_sync(file_path: str) -> str:
+def _transcribe_video_sync(file_path: str) -> tuple[str, str]:
     """Whisper (faster-whisper, mahalliy va BEPUL) orqali audio faylni
     matnga aylantiradi (bloklaydigan/sinxron — alohida threadda ishga
-    tushiriladi).
+    tushiriladi). Matn va Whisper aniqlagan manba til kodini (masalan "en",
+    "ru") qaytaradi — til kodi keyinchalik tarjima bosqichiga uzatiladi,
+    chunki MyMemory tarjima xizmati "auto" (avtomatik aniqlash) manba tilini
+    QABUL QILMAYDI, aniq til kodi talab qiladi.
     ESLATMA: bu yerga faqat AUDIO fayl (mp3) berilishi kerak, video emas —
     _extract_audio_sync orqali oldindan ajratib olinadi.
     ESLATMA 2: avval bu yerda ElevenLabs Speech-to-Text ishlatilgan edi
@@ -333,8 +336,9 @@ def _transcribe_video_sync(file_path: str) -> str:
     generatsiyasi) uchun ishlatiladi, matnga aylantirish esa mahalliy va
     bepul Whisper orqali amalga oshiriladi."""
     model = _get_whisper_model()
-    segments, _info = model.transcribe(file_path, beam_size=5)
-    return " ".join(segment.text.strip() for segment in segments).strip()
+    segments, info = model.transcribe(file_path, beam_size=5)
+    text = " ".join(segment.text.strip() for segment in segments).strip()
+    return text, info.language
 
 
 def _is_translation_noop(original: str, translated: str) -> bool:
@@ -394,10 +398,16 @@ def _translate_chunk_official_sync(chunk: str) -> str:
     return html.unescape(text)
 
 
-def _translate_chunk_sync(chunk: str) -> str:
+def _translate_chunk_sync(chunk: str, source_lang: str = "auto") -> str:
     """Bitta matn bo'lagini o'zbek tiliga tarjima qiladi.
 
-    ESLATMA: Bepul/rasmiy bo'lmagan tarjima xizmatlari (Google Translate va
+    source_lang — Whisper aniqlagan manba til kodi (masalan "en", "ru").
+    ESLATMA: MyMemory tarjima xizmati "auto" (avtomatik aniqlash) manba
+    tilini QABUL QILMAYDI ("'AUTO' IS AN INVALID SOURCE LANGUAGE" xatosi
+    beradi) — shuning uchun aniq til kodi talab qilinadi; Google Translate
+    esa "auto" bilan ham ishlaydi, lekin aniq kod berish yanada ishonchli.
+
+    ESLATMA 2: Bepul/rasmiy bo'lmagan tarjima xizmatlari (Google Translate va
     hokazo) server (datacenter) IP-manzillaridan kelgan so'rovlarni ba'zan
     vaqtincha bloklaydi yoki jim tarzda o'zgarishsiz matn qaytaradi — bu
     ayniqsa ketma-ket ko'p so'rov yuborilganda (bir nechta video) yuz beradi.
@@ -405,6 +415,10 @@ def _translate_chunk_sync(chunk: str) -> str:
     bo'lsa boshqa (zaxira) xizmatga o'tamiz — aks holda video "tarjima
     qilingandek" ko'rinib, aslida asl (masalan inglizcha) matn ovozga
     aylantirilib yuboriladi."""
+    if source_lang == "uz":
+        # Video allaqachon o'zbek tilida — tarjima shart emas (source==target
+        # bo'lsa, tarjima xizmatlari odatda xato qaytaradi).
+        return chunk
     if GOOGLE_TRANSLATE_API_KEY:
         try:
             return _translate_chunk_official_sync(chunk)
@@ -422,7 +436,7 @@ def _translate_chunk_sync(chunk: str) -> str:
 
     for attempt in range(3):
         try:
-            result = GoogleTranslator(source="auto", target="uz").translate(chunk)
+            result = GoogleTranslator(source=source_lang, target="uz").translate(chunk)
             if (
                 result and result.strip()
                 and not _is_translation_noop(chunk, result)
@@ -439,36 +453,43 @@ def _translate_chunk_sync(chunk: str) -> str:
         time.sleep(2 * (attempt + 1))
 
     log.warning("Google Translate ishlamadi — zaxira xizmat (MyMemory) sinaladi.")
-    try:
-        # MyMemory bepul tarifda ~500 belgigacha qabul qiladi, shuning uchun kichikroq
-        # bo'laklarga bo'lamiz.
-        sub_chunks = [chunk[i:i + 480] for i in range(0, len(chunk), 480)] or [chunk]
-        parts = []
-        for sub in sub_chunks:
-            # ESLATMA: MyMemory oddiy "uz" kodini qabul qilmaydi — faqat
-            # "uzn-UZ" ("northern uzbek") kodi bilan ishlaydi, aks holda
-            # "No support for the provided language" xatosi qaytaradi.
-            r = MyMemoryTranslator(source="auto", target="uzn-UZ").translate(sub)
-            if not r or not r.strip():
-                raise RuntimeError("MyMemory bo'sh natija qaytardi.")
-            if _looks_like_service_error(r):
-                raise RuntimeError(f"MyMemory xato xabarini qaytardi: {r!r}")
-            parts.append(r)
-        result = " ".join(parts)
-        if not _is_translation_noop(chunk, result):
-            return result
-        log.warning("MyMemory Translator ham no-op natija berdi.")
-    except Exception as e:
-        last_error = e
-        log.warning(f"MyMemory Translator xato: {e}")
+    # ESLATMA: MyMemory manba tili sifatida "auto"ni QABUL QILMAYDI — aniq
+    # til kodi kerak. Agar Whisper tilni aniqlay olmagan bo'lsa (source_lang
+    # "auto" bo'lib qolsa), MyMemory'ni sinamasdan o'tkazib yuboramiz.
+    if not source_lang or source_lang == "auto":
+        log.warning("Manba til kodi noma'lum — MyMemory o'tkazib yuborildi.")
+    else:
+        try:
+            # MyMemory bepul tarifda ~500 belgigacha qabul qiladi, shuning uchun kichikroq
+            # bo'laklarga bo'lamiz.
+            sub_chunks = [chunk[i:i + 480] for i in range(0, len(chunk), 480)] or [chunk]
+            parts = []
+            for sub in sub_chunks:
+                # ESLATMA: MyMemory oddiy "uz" kodini qabul qilmaydi — faqat
+                # "uzn-UZ" ("northern uzbek") kodi bilan ishlaydi, aks holda
+                # "No support for the provided language" xatosi qaytaradi.
+                r = MyMemoryTranslator(source=source_lang, target="uzn-UZ").translate(sub)
+                if not r or not r.strip():
+                    raise RuntimeError("MyMemory bo'sh natija qaytardi.")
+                if _looks_like_service_error(r):
+                    raise RuntimeError(f"MyMemory xato xabarini qaytardi: {r!r}")
+                parts.append(r)
+            result = " ".join(parts)
+            if not _is_translation_noop(chunk, result):
+                return result
+            log.warning("MyMemory Translator ham no-op natija berdi.")
+        except Exception as e:
+            last_error = e
+            log.warning(f"MyMemory Translator xato: {e}")
 
     raise RuntimeError(f"Tarjima xizmatlari javob bermadi (oxirgi xato: {last_error})")
 
 
-def _translate_to_uzbek_sync(text: str) -> str:
-    """Matnni o'zbek tiliga tarjima qiladi. Uzun matn bo'laklarga bo'lib tarjima qilinadi."""
+def _translate_to_uzbek_sync(text: str, source_lang: str = "auto") -> str:
+    """Matnni o'zbek tiliga tarjima qiladi. Uzun matn bo'laklarga bo'lib tarjima qilinadi.
+    source_lang — Whisper aniqlagan manba til kodi (masalan "en", "ru")."""
     chunks = [text[i:i + 4500] for i in range(0, len(text), 4500)] or [text]
-    translated_parts = [_translate_chunk_sync(chunk) for chunk in chunks]
+    translated_parts = [_translate_chunk_sync(chunk, source_lang) for chunk in chunks]
     final_text = " ".join(p for p in translated_parts if p)
     log.info(f"Tarjima natijasi (birinchi 200 belgi): {final_text[:200]!r}")
     return final_text
@@ -752,8 +773,12 @@ async def do_dubbing(message: Message, url: str) -> None:
         await asyncio.to_thread(_extract_audio_sync, video_path, extracted_audio_path)
 
         await status.edit_text("\U0001F4DD Nutq matnga aylantirilmoqda...")
-        original_text = await asyncio.to_thread(_transcribe_video_sync, extracted_audio_path)
-        log.info(f"Transkripsiya (birinchi 200 belgi): {original_text[:200]!r}")
+        original_text, detected_lang = await asyncio.to_thread(
+            _transcribe_video_sync, extracted_audio_path
+        )
+        log.info(
+            f"Transkripsiya (til: {detected_lang}, birinchi 200 belgi): {original_text[:200]!r}"
+        )
         if not original_text.strip():
             await status.edit_text(
                 "❌ Videoda tushunarli nutq topilmadi (faqat musiqa/shovqin bo'lishi mumkin)."
@@ -761,7 +786,9 @@ async def do_dubbing(message: Message, url: str) -> None:
             return
 
         await status.edit_text("\U0001F1FA\U0001F1FF O'zbek tiliga tarjima qilinmoqda...")
-        translated_text = await asyncio.to_thread(_translate_to_uzbek_sync, original_text)
+        translated_text = await asyncio.to_thread(
+            _translate_to_uzbek_sync, original_text, detected_lang
+        )
 
         await status.edit_text("\U0001F3A4 O'zbekcha ovoz yaratilmoqda...")
         speech_bytes = await asyncio.to_thread(
