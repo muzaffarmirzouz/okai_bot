@@ -212,7 +212,11 @@ def _download_video_sync(url: str, output_path: str) -> None:
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
-        "format": "best[ext=mp4]/best",
+        # Ba'zi videolarda tayyor mp4 formati bo'lmaydi (faqat alohida video/audio
+        # oqimlari bo'ladi) — shuning uchun bir nechta variantni ketma-ket sinaymiz
+        # va ffmpeg orqali birlashtiramiz (nixpacks.toml'da ffmpeg o'rnatilgan bo'lishi shart).
+        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+        "merge_output_format": "mp4",
         "outtmpl": output_path,
         "overwrites": True,
     }
