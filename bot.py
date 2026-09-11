@@ -328,12 +328,34 @@ def _transcribe_video_sync(file_path: str) -> str:
 
 def _translate_to_uzbek_sync(text: str) -> str:
     """Matnni o'zbek tiliga tarjima qiladi (deep-translator / Google Translate orqali).
-    Uzun matn bo'laklarga bo'lib tarjima qilinadi."""
+    Uzun matn bo'laklarga bo'lib tarjima qilinadi.
+
+    ESLATMA: Google Translate'ning rasmiy bo'lmagan (bepul) endpointi ba'zan server
+    IP-manzillaridan kelgan so'rovlarni rad etadi yoki jim tarzda o'zgarishsiz matnni
+    qaytarib yuboradi. Shu sababli har bir bo'lak alohida tekshiriladi va xato/no-op
+    holatlari logga yoziladi — aks holda video "tarjima qilingandek" ko'rinib,
+    aslida asl (masalan inglizcha) matn ovozga aylantirilib yuboriladi.
+    """
     chunks = [text[i:i + 4500] for i in range(0, len(text), 4500)] or [text]
-    translated_parts = [
-        GoogleTranslator(source="auto", target="uz").translate(chunk) for chunk in chunks
-    ]
-    return " ".join(p for p in translated_parts if p)
+    translated_parts: list[str] = []
+    for chunk in chunks:
+        try:
+            result = GoogleTranslator(source="auto", target="uz").translate(chunk)
+        except Exception as e:
+            log.error(f"Tarjima xatosi (bo'lak {len(chunk)} belgi): {e}")
+            raise RuntimeError(f"Google Translate xato qaytardi: {e}") from e
+        if not result or not result.strip():
+            log.error("Tarjima bo'sh natija qaytardi.")
+            raise RuntimeError("Google Translate bo'sh natija qaytardi.")
+        if result.strip().lower() == chunk.strip().lower() and len(chunk.strip()) > 15:
+            log.warning(
+                "Tarjima natijasi asl matn bilan bir xil chiqdi — tarjima "
+                "ishlamagan bo'lishi mumkin (Google Translate bloklagan bo'lishi mumkin)."
+            )
+        translated_parts.append(result)
+    final_text = " ".join(p for p in translated_parts if p)
+    log.info(f"Tarjima natijasi (birinchi 200 belgi): {final_text[:200]!r}")
+    return final_text
 
 
 def _mux_audio_into_video_sync(video_path: str, audio_path: str, output_path: str) -> None:
@@ -586,6 +608,7 @@ async def do_dubbing(message: Message, url: str) -> None:
 
         await status.edit_text("\U0001F4DD Nutq matnga aylantirilmoqda...")
         original_text = await asyncio.to_thread(_transcribe_video_sync, video_path)
+        log.info(f"Transkripsiya (birinchi 200 belgi): {original_text[:200]!r}")
         if not original_text.strip():
             await status.edit_text(
                 "❌ Videoda tushunarli nutq topilmadi (faqat musiqa/shovqin bo'lishi mumkin)."
