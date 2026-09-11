@@ -242,17 +242,18 @@ def _clone_voice_sync(name: str, audio_bytes: bytes, filename: str) -> str:
 def _base_ydl_opts() -> dict:
     """Barcha yt-dlp chaqiruvlari uchun umumiy sozlamalar.
 
-    ESLATMA: YouTube 2026-yilda anti-bot himoyasini yanada kuchaytirdi — standart
-    "web" klient ko'pincha formatlarni bermay qo'yadi ("Requested format is not
-    available"), chunki YouTube JavaScript-asoslangan tekshiruv (challenge) talab
-    qiladi. Shuni chetlab o'tish uchun "android"/"ios"/"tv" mobil klient
-    identifikatorlaridan foydalanamiz — ular odatda bu tekshiruvni talab qilmaydi.
+    ESLATMA: YouTube 2026-yilda "n-challenge" degan JavaScript-asoslangan
+    tekshiruvni joriy qildi — buni yechish uchun yt-dlp'ga Deno (JS runtime)
+    kerak (nixpacks.toml'da qo'shilgan). "ios" klientini ATAYLAB ishlatmaymiz,
+    chunki u cookie orqali autentifikatsiyani e'tiborsiz qoldiradi (OAuth talab
+    qiladi) — buning o'rniga cookie bilan yaxshi ishlaydigan "web"/"mweb"/"android"
+    klientlarini ketma-ket sinaymiz.
     """
     opts: dict = {
         "quiet": True,
         "no_warnings": True,
         "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
-        "extractor_args": {"youtube": {"player_client": ["android", "ios", "tv", "web"]}},
+        "extractor_args": {"youtube": {"player_client": ["web", "mweb", "android"]}},
     }
     if YOUTUBE_COOKIES_FILE:
         opts["cookiefile"] = YOUTUBE_COOKIES_FILE
