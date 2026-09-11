@@ -239,21 +239,31 @@ def _clone_voice_sync(name: str, audio_bytes: bytes, filename: str) -> str:
         return data["voice_id"]
 
 
+def _base_ydl_opts() -> dict:
+    """Barcha yt-dlp chaqiruvlari uchun umumiy sozlamalar.
+
+    ESLATMA: YouTube 2026-yilda anti-bot himoyasini yanada kuchaytirdi — standart
+    "web" klient ko'pincha formatlarni bermay qo'yadi ("Requested format is not
+    available"), chunki YouTube JavaScript-asoslangan tekshiruv (challenge) talab
+    qiladi. Shuni chetlab o'tish uchun "android"/"ios"/"tv" mobil klient
+    identifikatorlaridan foydalanamiz — ular odatda bu tekshiruvni talab qilmaydi.
+    """
+    opts: dict = {
+        "quiet": True,
+        "no_warnings": True,
+        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+        "extractor_args": {"youtube": {"player_client": ["android", "ios", "tv", "web"]}},
+    }
+    if YOUTUBE_COOKIES_FILE:
+        opts["cookiefile"] = YOUTUBE_COOKIES_FILE
+    return opts
+
+
 def _get_video_duration_sync(url: str) -> float | None:
     """Videoni yuklab olmasdan, uning davomiyligini (soniyalarda) aniqlaydi.
     Aniqlab bo'lmasa (masalan live efir) None qaytaradi."""
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        # skip_download=True bo'lsa ham, yt-dlp standart "best" formatni tanlashga
-        # urinadi — ba'zi videolarda (faqat alohida video/audio oqimi bo'lgan)
-        # bu "Requested format is not available" xatosini beradi. Shu sababli
-        # _download_video_sync bilan bir xil, kengroq format tanlagichini beramiz.
-        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
-    }
-    if YOUTUBE_COOKIES_FILE:
-        ydl_opts["cookiefile"] = YOUTUBE_COOKIES_FILE
+    ydl_opts = _base_ydl_opts()
+    ydl_opts["skip_download"] = True
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         return info.get("duration")
@@ -261,19 +271,10 @@ def _get_video_duration_sync(url: str) -> float | None:
 
 def _download_video_sync(url: str, output_path: str) -> None:
     """Videoni (audio bilan birga) berilgan fayl yo'liga yuklab oladi."""
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        # Ba'zi videolarda tayyor mp4 formati bo'lmaydi (faqat alohida video/audio
-        # oqimlari bo'ladi) — shuning uchun bir nechta variantni ketma-ket sinaymiz
-        # va ffmpeg orqali birlashtiramiz (nixpacks.toml'da ffmpeg o'rnatilgan bo'lishi shart).
-        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
-        "merge_output_format": "mp4",
-        "outtmpl": output_path,
-        "overwrites": True,
-    }
-    if YOUTUBE_COOKIES_FILE:
-        ydl_opts["cookiefile"] = YOUTUBE_COOKIES_FILE
+    ydl_opts = _base_ydl_opts()
+    ydl_opts["merge_output_format"] = "mp4"
+    ydl_opts["outtmpl"] = output_path
+    ydl_opts["overwrites"] = True
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
