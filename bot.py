@@ -246,14 +246,16 @@ def _base_ydl_opts() -> dict:
     tekshiruvni joriy qildi — buni yechish uchun yt-dlp'ga Deno (JS runtime)
     kerak (nixpacks.toml'da qo'shilgan). "ios" klientini ATAYLAB ishlatmaymiz,
     chunki u cookie orqali autentifikatsiyani e'tiborsiz qoldiradi (OAuth talab
-    qiladi) — buning o'rniga cookie bilan yaxshi ishlaydigan "web"/"mweb"/"android"
-    klientlarini ketma-ket sinaymiz.
+    qiladi). "web" klienti esa serverlardan kelgan so'rovlarni "sign in to
+    confirm you're not a bot" bilan bloklashi mumkin (hatto cookie bilan ham) —
+    shuning uchun avval sign-in devoridan xoli "android"/"tv" klientlarini,
+    keyin cookie foydali bo'lishi mumkin bo'lgan "web"/"mweb"'ni sinaymiz.
     """
     opts: dict = {
         "quiet": True,
         "no_warnings": True,
         "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
-        "extractor_args": {"youtube": {"player_client": ["web", "mweb", "android"]}},
+        "extractor_args": {"youtube": {"player_client": ["android", "tv", "web", "mweb"]}},
     }
     if YOUTUBE_COOKIES_FILE:
         opts["cookiefile"] = YOUTUBE_COOKIES_FILE
