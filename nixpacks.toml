@@ -1,8 +1,8 @@
 [phases.setup]
-nixPkgs = ["python311", "gcc", "ffmpeg"]
+nixPkgs = ["python311", "gcc", "ffmpeg", "deno"]
 
 [phases.install]
 cmds = ["pip install --break-system-packages -r requirements.txt"]
 
 [start]
-cmd = "python3 bot.py"
+cmd = "yt-dlp -U || true; python3 bot.py"
