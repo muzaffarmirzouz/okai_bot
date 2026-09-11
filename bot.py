@@ -398,6 +398,32 @@ def _translate_chunk_official_sync(chunk: str) -> str:
     return html.unescape(text)
 
 
+# MyMemory (deep_translator orqali) manba til sifatida oddiy 2-harfli ISO
+# kodlarni (Whisper qaytaradigan "ru", "en" kabi) QABUL QILMAYDI — faqat
+# o'zining "til-MAMLAKAT" formatidagi kodlarini (masalan "ru-RU", "en-GB")
+# taniydi. Shuning uchun Whisper kodini MyMemory kutgan formatga moslaymiz.
+# Ro'yxat MyMemory'ning o'zi qaytargan "qo'llab-quvvatlanadigan tillar"
+# xatosidan olingan (eng ko'p uchraydigan tillar bilan cheklangan).
+_MYMEMORY_LANG_CODES = {
+    "en": "en-GB", "ru": "ru-RU", "es": "es-ES", "fr": "fr-FR", "de": "de-DE",
+    "it": "it-IT", "pt": "pt-PT", "ar": "ar-SA", "zh": "zh-CN", "ja": "ja-JP",
+    "ko": "ko-KR", "hi": "hi-IN", "tr": "tr-TR", "uk": "uk-UA", "pl": "pl-PL",
+    "nl": "nl-NL", "sv": "sv-SE", "fa": "fa-IR", "ur": "ur-PK", "vi": "vi-VN",
+    "th": "th-TH", "id": "id-ID", "ms": "ms-MY", "bn": "bn-IN", "ta": "ta-IN",
+    "te": "te-IN", "mr": "mr-IN", "gu": "gu-IN", "pa": "pa-IN", "kk": "kk-KZ",
+    "ky": "ky-KG", "tg": "tg-TJ", "az": "az-AZ", "ka": "ka-GE", "hy": "hy-AM",
+    "he": "he-IL", "el": "el-GR", "cs": "cs-CZ", "sk": "sk-SK", "ro": "ro-RO",
+    "hu": "hu-HU", "fi": "fi-FI", "da": "da-DK", "no": "nb-NO", "uz": "uz-UZ",
+}
+
+
+def _mymemory_source_code(whisper_lang: str) -> str | None:
+    """Whisper qaytargan til kodini MyMemory tushunadigan formatga o'giradi.
+    Ro'yxatda yo'q til uchun None qaytaradi (bunday holda MyMemory sinab
+    ko'rilmaydi — noto'g'ri kod bilan urinish faqat vaqt yo'qotadi)."""
+    return _MYMEMORY_LANG_CODES.get((whisper_lang or "").strip().lower())
+
+
 def _translate_chunk_sync(chunk: str, source_lang: str = "auto") -> str:
     """Bitta matn bo'lagini o'zbek tiliga tarjima qiladi.
 
@@ -453,11 +479,15 @@ def _translate_chunk_sync(chunk: str, source_lang: str = "auto") -> str:
         time.sleep(2 * (attempt + 1))
 
     log.warning("Google Translate ishlamadi — zaxira xizmat (MyMemory) sinaladi.")
-    # ESLATMA: MyMemory manba tili sifatida "auto"ni QABUL QILMAYDI — aniq
-    # til kodi kerak. Agar Whisper tilni aniqlay olmagan bo'lsa (source_lang
-    # "auto" bo'lib qolsa), MyMemory'ni sinamasdan o'tkazib yuboramiz.
-    if not source_lang or source_lang == "auto":
-        log.warning("Manba til kodi noma'lum — MyMemory o'tkazib yuborildi.")
+    # ESLATMA: MyMemory manba tili sifatida na "auto"ni, na oddiy 2-harfli
+    # ISO kodni ("ru", "en") qabul qiladi — faqat o'zining "til-MAMLAKAT"
+    # formatidagi kodini ("ru-RU", "en-GB") taniydi, shuning uchun avval
+    # moslashtiramiz (_mymemory_source_code).
+    mm_source = _mymemory_source_code(source_lang)
+    if not mm_source:
+        log.warning(
+            f"MyMemory uchun mos manba til kodi topilmadi ({source_lang!r}) — o'tkazib yuborildi."
+        )
     else:
         try:
             # MyMemory bepul tarifda ~500 belgigacha qabul qiladi, shuning uchun kichikroq
@@ -465,10 +495,7 @@ def _translate_chunk_sync(chunk: str, source_lang: str = "auto") -> str:
             sub_chunks = [chunk[i:i + 480] for i in range(0, len(chunk), 480)] or [chunk]
             parts = []
             for sub in sub_chunks:
-                # ESLATMA: MyMemory oddiy "uz" kodini qabul qilmaydi — faqat
-                # "uzn-UZ" ("northern uzbek") kodi bilan ishlaydi, aks holda
-                # "No support for the provided language" xatosi qaytaradi.
-                r = MyMemoryTranslator(source=source_lang, target="uzn-UZ").translate(sub)
+                r = MyMemoryTranslator(source=mm_source, target="uz-UZ").translate(sub)
                 if not r or not r.strip():
                     raise RuntimeError("MyMemory bo'sh natija qaytardi.")
                 if _looks_like_service_error(r):
