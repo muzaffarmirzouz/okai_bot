@@ -283,8 +283,10 @@ def _download_video_sync(url: str, output_path: str) -> None:
 
 
 def _transcribe_video_sync(file_path: str) -> str:
-    """ElevenLabs Speech-to-Text orqali video/audio faylni matnga aylantiradi
-    (bloklaydigan/sinxron — alohida threadda ishga tushiriladi)."""
+    """ElevenLabs Speech-to-Text orqali audio faylni matnga aylantiradi
+    (bloklaydigan/sinxron — alohida threadda ishga tushiriladi).
+    ESLATMA: bu yerga faqat AUDIO fayl (mp3) berilishi kerak, video emas —
+    _extract_audio_sync orqali oldindan ajratib olinadi."""
     boundary = uuid.uuid4().hex
     with open(file_path, "rb") as f:
         file_bytes = f.read()
@@ -304,8 +306,8 @@ def _transcribe_video_sync(file_path: str) -> str:
     body.extend(
         (
             f'--{boundary}\r\n'
-            f'Content-Disposition: form-data; name="file"; filename="input.mp4"\r\n'
-            f'Content-Type: application/octet-stream\r\n\r\n'
+            f'Content-Disposition: form-data; name="file"; filename="input.mp3"\r\n'
+            f'Content-Type: audio/mpeg\r\n\r\n'
         ).encode("utf-8")
     )
     body.extend(file_bytes)
@@ -356,6 +358,30 @@ def _translate_to_uzbek_sync(text: str) -> str:
     final_text = " ".join(p for p in translated_parts if p)
     log.info(f"Tarjima natijasi (birinchi 200 belgi): {final_text[:200]!r}")
     return final_text
+
+
+def _extract_audio_sync(video_path: str, audio_out_path: str) -> None:
+    """Video faylidan faqat audio yo'lini ajratib oladi (ffmpeg orqali).
+
+    ESLATMA: Butun video faylini (video+audio birga) to'g'ridan-to'g'ri
+    Speech-to-Text'ga yuborish ba'zan noto'g'ri/"gallyutsinatsiya qilingan"
+    (haqiqiy nutqqa aloqasi yo'q, ko'pincha bir xil) natija berishi mumkin.
+    Shuning uchun avval toza audio ajratib olinadi.
+    """
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-vn",
+            "-acodec", "libmp3lame",
+            "-q:a", "4",
+            audio_out_path,
+        ],
+        capture_output=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg (audio ajratish) xato: {result.stderr.decode(errors='ignore')[-500:]}")
 
 
 def _mux_audio_into_video_sync(video_path: str, audio_path: str, output_path: str) -> None:
@@ -599,6 +625,7 @@ async def do_dubbing(message: Message, url: str) -> None:
         return
 
     video_path = tempfile.mktemp(suffix=".mp4")
+    extracted_audio_path = tempfile.mktemp(suffix=".mp3")
     audio_path = tempfile.mktemp(suffix=".mp3")
     final_path = tempfile.mktemp(suffix=".mp4")
 
@@ -606,8 +633,12 @@ async def do_dubbing(message: Message, url: str) -> None:
         await status.edit_text("\U0001F4E5 Video yuklab olinmoqda...")
         await asyncio.to_thread(_download_video_sync, url, video_path)
 
+        # Nutqni aniqroq tanish uchun avval videodan faqat audio ajratib olinadi
+        # (butun videoni to'g'ridan-to'g'ri yuborish gallyutsinatsiyaga olib kelgan edi).
+        await asyncio.to_thread(_extract_audio_sync, video_path, extracted_audio_path)
+
         await status.edit_text("\U0001F4DD Nutq matnga aylantirilmoqda...")
-        original_text = await asyncio.to_thread(_transcribe_video_sync, video_path)
+        original_text = await asyncio.to_thread(_transcribe_video_sync, extracted_audio_path)
         log.info(f"Transkripsiya (birinchi 200 belgi): {original_text[:200]!r}")
         if not original_text.strip():
             await status.edit_text(
@@ -641,7 +672,7 @@ async def do_dubbing(message: Message, url: str) -> None:
             "Boshqa video bilan qayta urinib ko'ring."
         )
     finally:
-        for p in (video_path, audio_path, final_path):
+        for p in (video_path, extracted_audio_path, audio_path, final_path):
             if p and os.path.exists(p):
                 os.remove(p)
 
