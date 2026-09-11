@@ -50,6 +50,7 @@ qaraganda ko'proq sarflaydi (Speech-to-Text + Text-to-Speech ikkalasi ham
 ishlatiladi) — shuning uchun 2 daqiqadan uzun videolar avtomatik rad etiladi.
 """
 import asyncio
+import base64
 import logging
 import os
 import re
@@ -91,6 +92,24 @@ log = logging.getLogger("akoai-bot")
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 ELEVENLABS_API_KEY = os.environ["ELEVENLABS_API_KEY"]
 ELEVENLABS_VOICE_ID = os.environ["ELEVENLABS_VOICE_ID"]
+
+# ESLATMA: YouTube ba'zan server (datacenter) IP-manzillaridan kelgan so'rovlarni
+# "bot" deb hisoblab, "Sign in to confirm you're not a bot" xatosi bilan bloklaydi.
+# Buni chetlab o'tish uchun brauzerdan eksport qilingan cookies.txt faylini
+# Base64 shaklida YOUTUBE_COOKIES_B64 nomli Railway Variable sifatida qo'shish
+# mumkin (ixtiyoriy — bo'lmasa, YouTube ba'zi videolarni berishdan bosh tortishi
+# mumkin, ayniqsa mashhur/yangi videolarda).
+YOUTUBE_COOKIES_B64 = os.environ.get("YOUTUBE_COOKIES_B64", "")
+YOUTUBE_COOKIES_FILE: str | None = None
+if YOUTUBE_COOKIES_B64:
+    try:
+        _cookies_bytes = base64.b64decode(YOUTUBE_COOKIES_B64)
+        _cookies_path = os.path.join(tempfile.gettempdir(), "youtube_cookies.txt")
+        with open(_cookies_path, "wb") as _f:
+            _f.write(_cookies_bytes)
+        YOUTUBE_COOKIES_FILE = _cookies_path
+    except Exception as _e:
+        logging.getLogger("akoai-bot").warning(f"YOUTUBE_COOKIES_B64'ni o'qishda xato: {_e}")
 
 # Majburiy obuna kanali
 CHANNEL_USERNAME = "@Namanganliklar_uz"
@@ -202,6 +221,8 @@ def _get_video_duration_sync(url: str) -> float | None:
     """Videoni yuklab olmasdan, uning davomiyligini (soniyalarda) aniqlaydi.
     Aniqlab bo'lmasa (masalan live efir) None qaytaradi."""
     ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    if YOUTUBE_COOKIES_FILE:
+        ydl_opts["cookiefile"] = YOUTUBE_COOKIES_FILE
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         return info.get("duration")
@@ -220,6 +241,8 @@ def _download_video_sync(url: str, output_path: str) -> None:
         "outtmpl": output_path,
         "overwrites": True,
     }
+    if YOUTUBE_COOKIES_FILE:
+        ydl_opts["cookiefile"] = YOUTUBE_COOKIES_FILE
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([url])
 
