@@ -445,7 +445,10 @@ def _translate_chunk_sync(chunk: str) -> str:
         sub_chunks = [chunk[i:i + 480] for i in range(0, len(chunk), 480)] or [chunk]
         parts = []
         for sub in sub_chunks:
-            r = MyMemoryTranslator(source="auto", target="uz").translate(sub)
+            # ESLATMA: MyMemory oddiy "uz" kodini qabul qilmaydi — faqat
+            # "uzn-UZ" ("northern uzbek") kodi bilan ishlaydi, aks holda
+            # "No support for the provided language" xatosi qaytaradi.
+            r = MyMemoryTranslator(source="auto", target="uzn-UZ").translate(sub)
             if not r or not r.strip():
                 raise RuntimeError("MyMemory bo'sh natija qaytardi.")
             if _looks_like_service_error(r):
