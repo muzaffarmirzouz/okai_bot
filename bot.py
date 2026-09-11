@@ -339,6 +339,36 @@ def _is_translation_noop(original: str, translated: str) -> bool:
     )
 
 
+# ESLATMA: MyMemory kabi bepul tarjima xizmatlari xato/limit holatida HTTP xato
+# QAYTARMAYDI — buning o'rniga "translatedText" maydonining o'ziga inglizcha xato
+# xabarini yozib yuboradi (masalan "MYMEMORY WARNING: YOU USED ALL AVAILABLE FREE
+# TRANSLATIONS..." yoki "... ERROR 500 ..."). Shuni tarjima deb qabul qilib olsak,
+# video aynan shu xato matnini ovozga aylantirib yuboradi — bu foydalanuvchi
+# ko'rgan holat. Shu sababli natijani qo'shimcha tekshiramiz.
+_TRANSLATION_ERROR_SIGNATURES = (
+    "mymemory warning",
+    "query length limit",
+    "invalid source",
+    "invalid target",
+    "please select two distinct languages",
+    "too many requests",
+    "quota",
+    "not available right now",
+    "translation unavailable",
+    "amount of words",
+)
+
+
+def _looks_like_service_error(text: str) -> bool:
+    lower = text.strip().lower()
+    if any(sig in lower for sig in _TRANSLATION_ERROR_SIGNATURES):
+        return True
+    # "error 500", "500 error", "error: 503" kabi HTTP status kod + error/warning so'zi
+    if re.search(r"\b(4\d{2}|5\d{2})\b", lower) and ("error" in lower or "warning" in lower):
+        return True
+    return False
+
+
 def _translate_chunk_sync(chunk: str) -> str:
     """Bitta matn bo'lagini o'zbek tiliga tarjima qiladi.
 
@@ -355,9 +385,16 @@ def _translate_chunk_sync(chunk: str) -> str:
     for attempt in range(3):
         try:
             result = GoogleTranslator(source="auto", target="uz").translate(chunk)
-            if result and result.strip() and not _is_translation_noop(chunk, result):
+            if (
+                result and result.strip()
+                and not _is_translation_noop(chunk, result)
+                and not _looks_like_service_error(result)
+            ):
                 return result
-            log.warning(f"Google Translate no-op/bo'sh natija berdi (urinish {attempt + 1}/3).")
+            log.warning(
+                f"Google Translate no-op/bo'sh/xato natija berdi (urinish {attempt + 1}/3): "
+                f"{result!r}"
+            )
         except Exception as e:
             last_error = e
             log.warning(f"Google Translate xato (urinish {attempt + 1}/3): {e}")
@@ -373,6 +410,8 @@ def _translate_chunk_sync(chunk: str) -> str:
             r = MyMemoryTranslator(source="auto", target="uz").translate(sub)
             if not r or not r.strip():
                 raise RuntimeError("MyMemory bo'sh natija qaytardi.")
+            if _looks_like_service_error(r):
+                raise RuntimeError(f"MyMemory xato xabarini qaytardi: {r!r}")
             parts.append(r)
         result = " ".join(parts)
         if not _is_translation_noop(chunk, result):
