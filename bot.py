@@ -34,20 +34,24 @@ ketishi mumkin — doimiy saqlash kerak bo'lsa, Railway Volume ulash tavsiya eti
 ESLATMA 2: ElevenLabs'ning tayyor Dubbing API'si o'zbek tilini target sifatida
 QO'LLAB-QUVVATLAMAYDI ("Target language 'uz' is not supported"). Shuning uchun
 video tarjima o'z pipeline'imiz orqali qilinadi: video yuklab olinadi (yt-dlp)
--> nutq matnga aylantiriladi (ElevenLabs Speech-to-Text) -> matn o'zbek tiliga
-tarjima qilinadi (deep-translator / Google Translate) -> tarjima ElevenLabs
-Text-to-Speech orqali ovozga aylantiriladi -> yangi ovoz videoga ffmpeg bilan
-qayta joylanadi. Natijada lab-sync mukammal bo'lmasligi mumkin (audio uzunligi
-original video bilan aynan mos kelmasligi mumkin).
+-> nutq matnga aylantiriladi (mahalliy/bepul Whisper — faster-whisper) -> matn
+o'zbek tiliga tarjima qilinadi (deep-translator / Google Translate) -> tarjima
+ElevenLabs Text-to-Speech orqali ovozga aylantiriladi -> yangi ovoz videoga
+ffmpeg bilan qayta joylanadi. Natijada lab-sync mukammal bo'lmasligi mumkin
+(audio uzunligi original video bilan aynan mos kelmasligi mumkin).
 
 ESLATMA 3: Bir nechta tashqi vosita kerak:
-  - requirements.txt fayliga "yt-dlp" va "deep-translator" qatorlarini qo'shing
-  - nixpacks.toml fayldagi nixPkgs ro'yxatiga "ffmpeg" ni qo'shing
+  - requirements.txt fayliga "yt-dlp", "deep-translator" va "faster-whisper"
+    qatorlarini qo'shing
+  - Railway'da RAILPACK_DEPLOY_APT_PACKAGES o'zgaruvchisiga "ffmpeg" ni qo'shing
   Bularsiz bot ishga tushmaydi yoki dublyaj funksiyasi ishlamaydi.
 
-ESLATMA 4: Dublyaj funksiyasi ElevenLabs kreditlarini oddiy Text-to-Speech'ga
-qaraganda ko'proq sarflaydi (Speech-to-Text + Text-to-Speech ikkalasi ham
-ishlatiladi) — shuning uchun 2 daqiqadan uzun videolar avtomatik rad etiladi.
+ESLATMA 4: Matnga aylantirish (Speech-to-Text) endi mahalliy Whisper orqali
+BEPUL amalga oshiriladi (ElevenLabs kredit sarflamaydi) — ElevenLabs faqat
+Text-to-Speech (ovoz generatsiyasi) uchun ishlatiladi. Whisper modeli hajmini
+WHISPER_MODEL_SIZE o'zgaruvchisi orqali sozlash mumkin (standart: "base";
+kichikroq/tezroq uchun "tiny", sifatliroq uchun "small" — Railway serveri
+resurslariga qarab tanlang).
 """
 import asyncio
 import base64
@@ -57,6 +61,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import uuid
 
 import urllib.request
@@ -292,50 +297,44 @@ def _download_video_sync(url: str, output_path: str) -> None:
         ydl.download([url])
 
 
+WHISPER_MODEL_SIZE = os.environ.get("WHISPER_MODEL_SIZE", "base").strip() or "base"
+_whisper_model = None
+_whisper_model_lock = threading.Lock()
+
+
+def _get_whisper_model():
+    """Whisper modelini birinchi chaqiruvda yuklaydi va keyingi chaqiruvlar
+    uchun xotirada saqlaydi (qayta-qayta yuklamaslik uchun)."""
+    global _whisper_model
+    if _whisper_model is None:
+        with _whisper_model_lock:
+            if _whisper_model is None:
+                from faster_whisper import WhisperModel
+
+                log.info(
+                    f"Whisper modeli ({WHISPER_MODEL_SIZE}) yuklanmoqda — "
+                    "birinchi marta biroz vaqt olishi mumkin..."
+                )
+                _whisper_model = WhisperModel(
+                    WHISPER_MODEL_SIZE, device="cpu", compute_type="int8"
+                )
+                log.info("Whisper modeli tayyor.")
+    return _whisper_model
+
+
 def _transcribe_video_sync(file_path: str) -> str:
-    """ElevenLabs Speech-to-Text orqali audio faylni matnga aylantiradi
-    (bloklaydigan/sinxron — alohida threadda ishga tushiriladi).
+    """Whisper (faster-whisper, mahalliy va BEPUL) orqali audio faylni
+    matnga aylantiradi (bloklaydigan/sinxron — alohida threadda ishga
+    tushiriladi).
     ESLATMA: bu yerga faqat AUDIO fayl (mp3) berilishi kerak, video emas —
-    _extract_audio_sync orqali oldindan ajratib olinadi."""
-    boundary = uuid.uuid4().hex
-    with open(file_path, "rb") as f:
-        file_bytes = f.read()
-
-    body = bytearray()
-
-    def add_field(field_name: str, value: str):
-        body.extend(
-            (
-                f'--{boundary}\r\n'
-                f'Content-Disposition: form-data; name="{field_name}"\r\n\r\n'
-                f'{value}\r\n'
-            ).encode("utf-8")
-        )
-
-    add_field("model_id", "scribe_v1")
-    body.extend(
-        (
-            f'--{boundary}\r\n'
-            f'Content-Disposition: form-data; name="file"; filename="input.mp3"\r\n'
-            f'Content-Type: audio/mpeg\r\n\r\n'
-        ).encode("utf-8")
-    )
-    body.extend(file_bytes)
-    body.extend(b"\r\n")
-    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
-
-    req = urllib.request.Request(
-        "https://api.elevenlabs.io/v1/speech-to-text",
-        data=bytes(body),
-        headers={
-            "xi-api-key": ELEVENLABS_API_KEY,
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-        return data.get("text", "")
+    _extract_audio_sync orqali oldindan ajratib olinadi.
+    ESLATMA 2: avval bu yerda ElevenLabs Speech-to-Text ishlatilgan edi
+    (kredit sarflardi) — endi ElevenLabs faqat Text-to-Speech (ovoz
+    generatsiyasi) uchun ishlatiladi, matnga aylantirish esa mahalliy va
+    bepul Whisper orqali amalga oshiriladi."""
+    model = _get_whisper_model()
+    segments, _info = model.transcribe(file_path, beam_size=5)
+    return " ".join(segment.text.strip() for segment in segments).strip()
 
 
 def _is_translation_noop(original: str, translated: str) -> bool:
