@@ -95,21 +95,43 @@ ELEVENLABS_VOICE_ID = os.environ["ELEVENLABS_VOICE_ID"]
 
 # ESLATMA: YouTube ba'zan server (datacenter) IP-manzillaridan kelgan so'rovlarni
 # "bot" deb hisoblab, "Sign in to confirm you're not a bot" xatosi bilan bloklaydi.
-# Buni chetlab o'tish uchun brauzerdan eksport qilingan cookies.txt faylini
-# Base64 shaklida YOUTUBE_COOKIES_B64 nomli Railway Variable sifatida qo'shish
-# mumkin (ixtiyoriy — bo'lmasa, YouTube ba'zi videolarni berishdan bosh tortishi
-# mumkin, ayniqsa mashhur/yangi videolarda).
-YOUTUBE_COOKIES_B64 = os.environ.get("YOUTUBE_COOKIES_B64", "")
-YOUTUBE_COOKIES_FILE: str | None = None
-if YOUTUBE_COOKIES_B64:
+# Buni chetlab o'tish uchun brauzerdan eksport qilingan cookies.txt faylini Railway
+# Variable sifatida qo'shish mumkin (ixtiyoriy — bo'lmasa, YouTube ba'zi videolarni
+# berishdan bosh tortishi mumkin). Ikki xil variable qo'llab-quvvatlanadi:
+#   YOUTUBE_COOKIES      — cookies.txt matnini TO'G'RIDAN-TO'G'RI (base64siz) joylang
+#   YOUTUBE_COOKIES_B64   — yoki cookies.txt'ning Base64 shakli
+# Fayl noto'g'ri/buzilgan bo'lsa ham bot yiqilmaydi — shunchaki cookies'siz davom
+# etadi (aks holda buzilgan fayl BARCHA video so'rovlarini buzib qo'yishi mumkin edi).
+_log = logging.getLogger("akoai-bot")
+
+
+def _load_youtube_cookies() -> str | None:
+    raw = os.environ.get("YOUTUBE_COOKIES", "").strip()
+    if not raw:
+        b64 = os.environ.get("YOUTUBE_COOKIES_B64", "").strip()
+        if not b64:
+            return None
+        try:
+            raw = base64.b64decode(b64).decode("utf-8")
+        except Exception as e:
+            _log.warning(f"YOUTUBE_COOKIES_B64 noto'g'ri/buzilgan, cookies'siz davom etiladi: {e}")
+            return None
+
+    if "netscape" not in raw.lower() and "\t" not in raw:
+        _log.warning("YOUTUBE_COOKIES(_B64) cookies.txt formatiga o'xshamayapti, e'tiborga olinmaydi.")
+        return None
+
     try:
-        _cookies_bytes = base64.b64decode(YOUTUBE_COOKIES_B64)
-        _cookies_path = os.path.join(tempfile.gettempdir(), "youtube_cookies.txt")
-        with open(_cookies_path, "wb") as _f:
-            _f.write(_cookies_bytes)
-        YOUTUBE_COOKIES_FILE = _cookies_path
-    except Exception as _e:
-        logging.getLogger("akoai-bot").warning(f"YOUTUBE_COOKIES_B64'ni o'qishda xato: {_e}")
+        path = os.path.join(tempfile.gettempdir(), "youtube_cookies.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(raw)
+        return path
+    except Exception as e:
+        _log.warning(f"Cookies faylini yozishda xato, cookies'siz davom etiladi: {e}")
+        return None
+
+
+YOUTUBE_COOKIES_FILE: str | None = _load_youtube_cookies()
 
 # Majburiy obuna kanali
 CHANNEL_USERNAME = "@Namanganliklar_uz"
