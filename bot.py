@@ -82,6 +82,17 @@ VIDEO_URL_REGEX = re.compile(
 )
 DUBBING_MAX_SECONDS = 120  # 2 daqiqadan uzun videolar rad etiladi
 
+# Botni reklama qilish uchun har bir natija (video/audio) bilan birga
+# yuboriladigan izoh matnlari.
+DUBBING_PROMO_CAPTION = (
+    "🇺🇿 O'zbekistonda ilk bor yaratilgan video dublyaj bot!\n"
+    "🤖 @OkaAI_Bot"
+)
+TTS_PROMO_CAPTION = (
+    "🇺🇿 O'zbekistonda ilk bor yaratilgan AI ovoz boti!\n"
+    "🤖 @OkaAI_Bot"
+)
+
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.types import (
     Message,
@@ -827,7 +838,10 @@ async def do_dubbing(message: Message, url: str) -> None:
         await status.edit_text("\U0001F3AC Video yig'ilmoqda...")
         await asyncio.to_thread(_mux_audio_into_video_sync, video_path, audio_path, final_path)
 
-        await message.answer_video(video=FSInputFile(final_path, filename="dublyaj.mp4"))
+        await message.answer_video(
+            video=FSInputFile(final_path, filename="dublyaj.mp4"),
+            caption=DUBBING_PROMO_CAPTION,
+        )
         await status.delete()
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="ignore")
@@ -882,6 +896,7 @@ async def do_tts(message: Message, text: str) -> None:
         await message.answer_audio(
             audio=FSInputFile(tmp_path, filename="AkoAI.mp3"),
             title="AkoAI",
+            caption=TTS_PROMO_CAPTION,
         )
         await status.delete()
     finally:
