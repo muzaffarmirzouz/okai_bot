@@ -63,7 +63,9 @@ import urllib.error
 import json
 
 import yt_dlp
-from deep_translator import GoogleTranslator
+import time
+
+from deep_translator import GoogleTranslator, MyMemoryTranslator
 
 # YouTube/TikTok link aniqlash uchun (dublyaj funksiyasi shu link kelganda ishga tushadi)
 # re.search bilan ishlatiladi, shuning uchun link matnning istalgan joyida
@@ -328,33 +330,65 @@ def _transcribe_video_sync(file_path: str) -> str:
         return data.get("text", "")
 
 
-def _translate_to_uzbek_sync(text: str) -> str:
-    """Matnni o'zbek tiliga tarjima qiladi (deep-translator / Google Translate orqali).
-    Uzun matn bo'laklarga bo'lib tarjima qilinadi.
+def _is_translation_noop(original: str, translated: str) -> bool:
+    """Tarjima natijasi asl matn bilan bir xil bo'lsa — demak tarjima
+    amalda ishlamagan (xizmat vaqtincha bloklagan/limitga tushgan) degani."""
+    return (
+        translated.strip().lower() == original.strip().lower()
+        and len(original.strip()) > 15
+    )
 
-    ESLATMA: Google Translate'ning rasmiy bo'lmagan (bepul) endpointi ba'zan server
-    IP-manzillaridan kelgan so'rovlarni rad etadi yoki jim tarzda o'zgarishsiz matnni
-    qaytarib yuboradi. Shu sababli har bir bo'lak alohida tekshiriladi va xato/no-op
-    holatlari logga yoziladi — aks holda video "tarjima qilingandek" ko'rinib,
-    aslida asl (masalan inglizcha) matn ovozga aylantirilib yuboriladi.
-    """
-    chunks = [text[i:i + 4500] for i in range(0, len(text), 4500)] or [text]
-    translated_parts: list[str] = []
-    for chunk in chunks:
+
+def _translate_chunk_sync(chunk: str) -> str:
+    """Bitta matn bo'lagini o'zbek tiliga tarjima qiladi.
+
+    ESLATMA: Bepul/rasmiy bo'lmagan tarjima xizmatlari (Google Translate va
+    hokazo) server (datacenter) IP-manzillaridan kelgan so'rovlarni ba'zan
+    vaqtincha bloklaydi yoki jim tarzda o'zgarishsiz matn qaytaradi — bu
+    ayniqsa ketma-ket ko'p so'rov yuborilganda (bir nechta video) yuz beradi.
+    Shu sababli: (1) bir necha marta qayta urinamiz, (2) muvaffaqiyatsiz
+    bo'lsa boshqa (zaxira) xizmatga o'tamiz — aks holda video "tarjima
+    qilingandek" ko'rinib, aslida asl (masalan inglizcha) matn ovozga
+    aylantirilib yuboriladi."""
+    last_error: Exception | None = None
+
+    for attempt in range(3):
         try:
             result = GoogleTranslator(source="auto", target="uz").translate(chunk)
+            if result and result.strip() and not _is_translation_noop(chunk, result):
+                return result
+            log.warning(f"Google Translate no-op/bo'sh natija berdi (urinish {attempt + 1}/3).")
         except Exception as e:
-            log.error(f"Tarjima xatosi (bo'lak {len(chunk)} belgi): {e}")
-            raise RuntimeError(f"Google Translate xato qaytardi: {e}") from e
-        if not result or not result.strip():
-            log.error("Tarjima bo'sh natija qaytardi.")
-            raise RuntimeError("Google Translate bo'sh natija qaytardi.")
-        if result.strip().lower() == chunk.strip().lower() and len(chunk.strip()) > 15:
-            log.warning(
-                "Tarjima natijasi asl matn bilan bir xil chiqdi — tarjima "
-                "ishlamagan bo'lishi mumkin (Google Translate bloklagan bo'lishi mumkin)."
-            )
-        translated_parts.append(result)
+            last_error = e
+            log.warning(f"Google Translate xato (urinish {attempt + 1}/3): {e}")
+        time.sleep(2 * (attempt + 1))
+
+    log.warning("Google Translate ishlamadi — zaxira xizmat (MyMemory) sinaladi.")
+    try:
+        # MyMemory bepul tarifda ~500 belgigacha qabul qiladi, shuning uchun kichikroq
+        # bo'laklarga bo'lamiz.
+        sub_chunks = [chunk[i:i + 480] for i in range(0, len(chunk), 480)] or [chunk]
+        parts = []
+        for sub in sub_chunks:
+            r = MyMemoryTranslator(source="auto", target="uz").translate(sub)
+            if not r or not r.strip():
+                raise RuntimeError("MyMemory bo'sh natija qaytardi.")
+            parts.append(r)
+        result = " ".join(parts)
+        if not _is_translation_noop(chunk, result):
+            return result
+        log.warning("MyMemory Translator ham no-op natija berdi.")
+    except Exception as e:
+        last_error = e
+        log.warning(f"MyMemory Translator xato: {e}")
+
+    raise RuntimeError(f"Tarjima xizmatlari javob bermadi (oxirgi xato: {last_error})")
+
+
+def _translate_to_uzbek_sync(text: str) -> str:
+    """Matnni o'zbek tiliga tarjima qiladi. Uzun matn bo'laklarga bo'lib tarjima qilinadi."""
+    chunks = [text[i:i + 4500] for i in range(0, len(text), 4500)] or [text]
+    translated_parts = [_translate_chunk_sync(chunk) for chunk in chunks]
     final_text = " ".join(p for p in translated_parts if p)
     log.info(f"Tarjima natijasi (birinchi 200 belgi): {final_text[:200]!r}")
     return final_text
