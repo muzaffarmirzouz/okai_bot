@@ -242,7 +242,16 @@ def _clone_voice_sync(name: str, audio_bytes: bytes, filename: str) -> str:
 def _get_video_duration_sync(url: str) -> float | None:
     """Videoni yuklab olmasdan, uning davomiyligini (soniyalarda) aniqlaydi.
     Aniqlab bo'lmasa (masalan live efir) None qaytaradi."""
-    ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        # skip_download=True bo'lsa ham, yt-dlp standart "best" formatni tanlashga
+        # urinadi — ba'zi videolarda (faqat alohida video/audio oqimi bo'lgan)
+        # bu "Requested format is not available" xatosini beradi. Shu sababli
+        # _download_video_sync bilan bir xil, kengroq format tanlagichini beramiz.
+        "format": "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+    }
     if YOUTUBE_COOKIES_FILE:
         ydl_opts["cookiefile"] = YOUTUBE_COOKIES_FILE
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
