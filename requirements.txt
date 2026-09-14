@@ -1,4 +1,4 @@
 aiogram==3.13.1
-yt-dlp[default]
+yt-dlp>=2026.9.1
 deep-translator
 faster-whisper
