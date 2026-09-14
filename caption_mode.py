@@ -5,9 +5,14 @@ Nima qiladi:
   1) /caption bosilsa (yoki menyudan tugma orqali) rejim yoqiladi
   2) Foydalanuvchi video fayl YOKI Instagram post/reel ssilkasini yuboradi
   3) ffmpeg bilan audio ajratiladi
-  4) faster-whisper bilan til aniqlanadi + transkript qilinadi
-     - agar til "uz" bo'lmasa -> rad javobi qaytariladi
-  5) Segmentlardan SRT yasaladi
+  4) maxsus o'zbek tiliga moslashtirilgan (fine-tuned) ASR modeli
+     (OvozifyLabs/whisper-small-uz-v1, transformers kutubxonasi orqali)
+     bilan transkript qilinadi — umumiy Whisper modellari (hatto
+     "medium" o'lchamda ham) o'zbek tilida juda kam ma'lumot bilan
+     o'qitilgani uchun sifat past bo'ladi, shu sababli maxsus model
+     ishlatiladi
+  5) So'z darajasidagi vaqt belgilaridan SRT yasaladi (har qator ~4-5
+     so'zdan oshmaydi)
   6) ffmpeg (libass) bilan subtitr videoga "kuydiriladi" (hardsub)
   7) Tayyor video foydalanuvchiga qaytariladi
 
@@ -16,15 +21,19 @@ Botga ulash:
   2) main.py (yoki dispatcher sozlanadigan joyda):
          from handlers.caption_mode import caption_router
          dp.include_router(caption_router)
-  3) Agar faster-whisper modelingiz allaqachon boshqa joyda (masalan
-     video tarjima funksiyasida) global qilib yuklangan bo'lsa, shu
-     yerdagi get_whisper_model() o'rniga o'sha global obyektni
-     import qiling — bitta jarayonda modelni ikki marta yuklamang.
+  3) MUHIM: bu modul o'z ichida ALOHIDA ASR modelini yuklaydi
+     (bot.py'dagi faster-whisper'dan mustaqil) — chunki ular boshqa-
+     boshqa format/kutubxona (CTranslate2 vs transformers). Shuning
+     uchun ikkita alohida model xotirada turadi; agar server resursi
+     yetishmasa, CAPTION_ASR_MODEL orqali kichikroq model tanlashingiz
+     yoki bu funksiyani alohida servisga chiqarishingiz mumkin.
   4) /menu inline klaviaturangizga quyidagi tugmani qo'shing:
          InlineKeyboardButton(text="📝 Titr qo'shish", callback_data="mode_caption")
-  5) Kerakli paketlar (loyihada allaqachon bo'lishi kerak, chunki
-     video tarjima funksiyasi ham ulardan foydalanadi):
-         faster-whisper, yt-dlp, ffmpeg (RAILPACK_DEPLOY_APT_PACKAGES orqali)
+  5) Kerakli paketlar — requirements.txt'ga qo'shing:
+         transformers, torch (CPU versiyasi yetarli), yt-dlp, ffmpeg
+         (RAILPACK_DEPLOY_APT_PACKAGES orqali — allaqachon bor)
+     ESLATMA: torch o'rnatilishi build vaqtini va konteyner hajmini
+     sezilarli oshiradi (yuzlab MB).
   6) Instagramning yopiq/limitli postlari uchun, YOUTUBE_COOKIES bilan
      qilingan patternga o'xshab, ixtiyoriy INSTAGRAM_COOKIES env
      o'zgaruvchisini qo'shishingiz mumkin (pastda ishlatilgan).
@@ -35,6 +44,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -50,23 +60,44 @@ caption_router = Router(name="caption_mode")
 
 # ---------------------------------------------------------------- sozlamalar
 
-WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
 MAX_VIDEO_SECONDS = int(os.getenv("CAPTION_MAX_SECONDS", "180"))  # 3 daqiqa
 MAX_FILE_MB = 200
 
 INSTAGRAM_URL_RE = re.compile(r"(https?://)?(www\.)?instagram\.com/\S+", re.IGNORECASE)
 
-def get_whisper_model():
-    """bot.py'da video-tarjima funksiyasi uchun allaqachon yuklangan Whisper
-    modelini qayta ishlatadi (o'sha lazy-singleton _get_whisper_model()) —
-    shunda xotirada ikkita alohida Whisper modeli birga turib qolmaydi.
-    Import funksiya ICHIDA qilinadi (module darajasida emas), chunki
-    bot.py caption_router'ni import qilganda, bot.py hali to'liq
-    yuklanib ulgurmagan bo'ladi (circular import) — bu chaqiruv esa faqat
-    foydalanuvchi haqiqatan video yuborganda, ya'ni bot allaqachon to'liq
-    ishga tushgandan keyin amalga oshadi."""
-    from bot import _get_whisper_model
-    return _get_whisper_model()
+_asr_pipeline = None
+_asr_lock = threading.Lock()
+
+# Umumiy (generic) Whisper modellari o'zbek tilida juda kam ma'lumot bilan
+# o'qitilgan — hattoki "medium" o'lcham ham deyarli foyda bermaydi. Shuning
+# uchun maxsus o'zbek tiliga moslashtirilgan (fine-tuned) model ishlatiladi:
+# haqiqiy Telegram ovozli xabarlari (norasmiy nutq) ustida o'qitilgan,
+# ijtimoiy tarmoq videolariga juda mos keladi.
+ASR_MODEL_NAME = os.getenv("CAPTION_ASR_MODEL", "OvozifyLabs/whisper-small-uz-v1")
+
+
+def get_asr_pipeline():
+    """Maxsus o'zbek tiliga moslashtirilgan ASR pipeline'ni bitta marta
+    yuklaydi (lazy singleton). ESLATMA: bu bot.py'dagi umumiy Whisper
+    modelidan MUSTAQIL — chunki bu boshqa (transformers) formatida va
+    maxsus o'zbek tili uchun o'qitilgan, shuning uchun ular bilan
+    almashtirib bo'lmaydi."""
+    global _asr_pipeline
+    if _asr_pipeline is None:
+        with _asr_lock:
+            if _asr_pipeline is None:
+                from transformers import pipeline as hf_pipeline
+
+                logger.info(f"O'zbekcha ASR modeli ({ASR_MODEL_NAME}) yuklanmoqda...")
+                _asr_pipeline = hf_pipeline(
+                    "automatic-speech-recognition",
+                    model=ASR_MODEL_NAME,
+                    chunk_length_s=30,
+                    stride_length_s=5,
+                    device=-1,  # CPU
+                )
+                logger.info("O'zbekcha ASR modeli tayyor.")
+    return _asr_pipeline
 
 
 class CaptionStates(StatesGroup):
@@ -199,40 +230,21 @@ async def process_and_reply(message: Message, status: Message, src_path: Path, t
         return
 
     await status.edit_text("🧠 Nutq tanilmoqda...")
-    model = get_whisper_model()
-    # ESLATMA: Whisper'ning avtomatik til aniqlash funksiyasi o'zbek tili
-    # uchun ishonchsiz (ko'pincha fors/qozoq/gruzin/turk bilan chalkashtiradi,
-    # ayniqsa qisqa audio'larda). Bu bot faqat o'zbek videolari uchun
-    # mo'ljallangani sababli, tilni majburiy "uz" deb belgilaymiz.
-    #
-    # initial_prompt — modelni o'zbekcha imlo/lug'atga yo'naltirish uchun
-    # (o'zbek va turk bir oilaga mansub bo'lgani uchun, promptsiz model
-    # ba'zan turkcha imlo qoidalarini ishlatib yuborishi mumkin).
-    #
-    # word_timestamps=True — har bir so'zning aniq vaqtini olish uchun
-    # (subtitrlarni qisqa qatorlarga bo'lish shu orqali amalga oshiriladi).
-    #
-    # vad_filter=True — jimlik/faqat musiqa bo'lgan qismlarni o'tkazib
-    # yuboradi (aks holda Whisper bunday joylarda "gallyutsinatsiya"
-    # qilib, mavjud bo'lmagan matn to'qib chiqarishi mumkin).
-    segments_gen, info = model.transcribe(
+    pipe = get_asr_pipeline()
+    result = await asyncio.to_thread(
+        pipe,
         str(audio_path),
-        language="uz",
-        task="transcribe",
-        beam_size=5,
-        word_timestamps=True,
-        vad_filter=True,
-        condition_on_previous_text=False,
-        initial_prompt="Quyida o'zbek tilidagi nutq matnga o'girilgan.",
+        return_timestamps="word",
+        generate_kwargs={"language": "uzbek", "task": "transcribe"},
     )
-    segments = list(segments_gen)
+    words = result.get("chunks") or []
 
-    if not segments:
+    if not words:
         await status.edit_text("❌ Videoda nutq topilmadi.")
         return
 
     srt_path = tmp / "subs.srt"
-    write_srt(segments, srt_path)
+    write_srt(words, srt_path)
 
     await status.edit_text("🎞 Titr videoga yozilmoqda...")
     out_path = tmp / "output.mp4"
@@ -280,43 +292,51 @@ def format_timestamp(seconds: float) -> str:
     return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
 
-def group_words_into_lines(segments, max_words: int = 5, max_chars: int = 42, max_duration: float = 4.0):
-    """Whisper'ning so'z darajasidagi vaqt belgilaridan (word_timestamps=True
-    bilan olingan) qisqa subtitr qatorlarini yasaydi — har birida bir necha
-    so'z, uzoq jumlalar bitta katta blok bo'lib chiqmasligi uchun."""
+def group_words_into_lines(words, max_words: int = 5, max_chars: int = 42, max_duration: float = 4.0):
+    """transformers ASR pipeline'ning so'z darajasidagi natijasidan
+    (return_timestamps="word" bilan olingan, har biri {"text": ..,
+    "timestamp": (start, end)} ko'rinishidagi lug'at) qisqa subtitr
+    qatorlarini yasaydi."""
     lines = []
     current_words = []
     current_start = None
+    last_end = 0.0
 
-    for segment in segments:
-        words = getattr(segment, "words", None) or []
-        for word in words:
-            if current_start is None:
-                current_start = word.start
-            current_words.append(word)
+    for word in words:
+        text = word.get("text", "")
+        start, end = word.get("timestamp", (None, None))
+        if start is None:
+            start = last_end
+        if end is None:
+            end = start
+        last_end = end
 
-            text_so_far = "".join(w.word for w in current_words).strip()
-            duration = word.end - current_start
+        if current_start is None:
+            current_start = start
+        current_words.append(text)
 
-            if (
-                len(current_words) >= max_words
-                or len(text_so_far) >= max_chars
-                or duration >= max_duration
-            ):
-                lines.append((current_start, word.end, text_so_far))
-                current_words = []
-                current_start = None
+        text_so_far = "".join(current_words).strip()
+        duration = end - current_start
+
+        if (
+            len(current_words) >= max_words
+            or len(text_so_far) >= max_chars
+            or duration >= max_duration
+        ):
+            lines.append((current_start, end, text_so_far))
+            current_words = []
+            current_start = None
 
     if current_words:
-        text_so_far = "".join(w.word for w in current_words).strip()
-        lines.append((current_start, current_words[-1].end, text_so_far))
+        text_so_far = "".join(current_words).strip()
+        lines.append((current_start, last_end, text_so_far))
 
     return lines
 
 
-def write_srt(segments, path: Path):
+def write_srt(words, path: Path):
     lines = []
-    entries = group_words_into_lines(segments)
+    entries = group_words_into_lines(words)
     for i, (start, end, text) in enumerate(entries, start=1):
         if not text:
             continue
