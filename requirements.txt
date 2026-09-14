@@ -2,3 +2,5 @@ aiogram==3.13.1
 yt-dlp[default]
 deep-translator
 faster-whisper
+transformers
+torch
