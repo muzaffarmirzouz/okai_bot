@@ -56,22 +56,17 @@ MAX_FILE_MB = 200
 
 INSTAGRAM_URL_RE = re.compile(r"(https?://)?(www\.)?instagram\.com/\S+", re.IGNORECASE)
 
-_whisper_model = None
-
-
 def get_whisper_model():
-    """faster-whisper modelini bitta marta yuklaydi (lazy singleton).
-
-    ESLATMA: agar botda bu model boshqa fayl/handlerda (masalan video
-    tarjima funksiyasida) allaqachon global qilib yuklangan bo'lsa,
-    shu funksiyani o'sha modulni import qilib qaytarishga almashtiring —
-    xotirada ikkita Whisper modeli birga tursa, server qimmatga tushadi.
-    """
-    global _whisper_model
-    if _whisper_model is None:
-        from faster_whisper import WhisperModel
-        _whisper_model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
-    return _whisper_model
+    """bot.py'da video-tarjima funksiyasi uchun allaqachon yuklangan Whisper
+    modelini qayta ishlatadi (o'sha lazy-singleton _get_whisper_model()) —
+    shunda xotirada ikkita alohida Whisper modeli birga turib qolmaydi.
+    Import funksiya ICHIDA qilinadi (module darajasida emas), chunki
+    bot.py caption_router'ni import qilganda, bot.py hali to'liq
+    yuklanib ulgurmagan bo'ladi (circular import) — bu chaqiruv esa faqat
+    foydalanuvchi haqiqatan video yuborganda, ya'ni bot allaqachon to'liq
+    ishga tushgandan keyin amalga oshadi."""
+    from bot import _get_whisper_model
+    return _get_whisper_model()
 
 
 class CaptionStates(StatesGroup):
