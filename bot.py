@@ -625,10 +625,11 @@ SUBSCRIBE_TEXT = (
 
 WELCOME_TEXT = (
     "\U0001F916 AkoAI botiga xush kelibsiz!\n\n"
-    "Men ikki xil ishni qila olaman:\n"
+    "Men uch xil ishni qila olaman:\n"
     "\U0001F50A Textni audio qilish — matningizni mp3 ovozga aylantiraman.\n"
     "\U0001F3AC Video tarjima — YouTube/TikTok videosini o'zbek tiliga dublyaj qilaman "
-    f"({DUBBING_MAX_SECONDS // 60} daqiqagacha bo'lgan videolar uchun).\n\n"
+    f"({DUBBING_MAX_SECONDS // 60} daqiqagacha bo'lgan videolar uchun).\n"
+    "\U0001F4DD Videoga text yozish — video yoki Instagram linkiga o'zbekcha titr qo'shaman.\n\n"
     "Quyidan kerakli rejimni tanlang \U0001F447"
 )
 
@@ -655,6 +656,7 @@ def mode_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="\U0001F50A Textni audio qilish", callback_data="mode_tts")],
             [InlineKeyboardButton(text="\U0001F3AC Video tarjima", callback_data="mode_dub")],
+            [InlineKeyboardButton(text="\U0001F4DD Videoga text yozish", callback_data="mode_caption")],
         ]
     )
 
