@@ -200,16 +200,13 @@ async def process_and_reply(message: Message, status: Message, src_path: Path, t
 
     await status.edit_text("🧠 Nutq tanilmoqda...")
     model = get_whisper_model()
-    segments_gen, info = model.transcribe(str(audio_path), language=None, task="transcribe")
+    # ESLATMA: Whisper'ning avtomatik til aniqlash funksiyasi o'zbek tili
+    # uchun ishonchsiz (ko'pincha fors/qozoq/gruzin/turk bilan chalkashtiradi,
+    # ayniqsa qisqa audio'larda). Bu bot faqat o'zbek videolari uchun
+    # mo'ljallangani sababli, tilni majburiy "uz" deb belgilaymiz va
+    # avtomatik aniqlash/rad etishni ishlatmaymiz.
+    segments_gen, info = model.transcribe(str(audio_path), language="uz", task="transcribe")
     segments = list(segments_gen)
-
-    detected_lang = info.language
-    if detected_lang != "uz":
-        await status.edit_text(
-            f"❌ Video o'zbek tilida emasga o'xshaydi (aniqlangan til: {detected_lang}).\n"
-            "Faqat o'zbek tilidagi videolar qo'llab-quvvatlanadi."
-        )
-        return
 
     if not segments:
         await status.edit_text("❌ Videoda nutq topilmadi.")
