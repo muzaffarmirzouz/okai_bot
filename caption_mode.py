@@ -153,7 +153,13 @@ async def handle_link_input(message: Message, state: FSMContext):
 
 async def download_instagram_video(url: str, dest: Path) -> bool:
     """yt-dlp orqali Instagram post/reel'ni yuklab oladi."""
-    cmd = ["yt-dlp", "-f", "mp4", "-o", str(dest), url]
+    cmd = [
+        "yt-dlp",
+        "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+        "--merge-output-format", "mp4",
+        "-o", str(dest),
+        url,
+    ]
 
     cookies_content = os.getenv("INSTAGRAM_COOKIES")
     if cookies_content:
