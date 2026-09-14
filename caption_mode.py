@@ -203,9 +203,28 @@ async def process_and_reply(message: Message, status: Message, src_path: Path, t
     # ESLATMA: Whisper'ning avtomatik til aniqlash funksiyasi o'zbek tili
     # uchun ishonchsiz (ko'pincha fors/qozoq/gruzin/turk bilan chalkashtiradi,
     # ayniqsa qisqa audio'larda). Bu bot faqat o'zbek videolari uchun
-    # mo'ljallangani sababli, tilni majburiy "uz" deb belgilaymiz va
-    # avtomatik aniqlash/rad etishni ishlatmaymiz.
-    segments_gen, info = model.transcribe(str(audio_path), language="uz", task="transcribe")
+    # mo'ljallangani sababli, tilni majburiy "uz" deb belgilaymiz.
+    #
+    # initial_prompt — modelni o'zbekcha imlo/lug'atga yo'naltirish uchun
+    # (o'zbek va turk bir oilaga mansub bo'lgani uchun, promptsiz model
+    # ba'zan turkcha imlo qoidalarini ishlatib yuborishi mumkin).
+    #
+    # word_timestamps=True — har bir so'zning aniq vaqtini olish uchun
+    # (subtitrlarni qisqa qatorlarga bo'lish shu orqali amalga oshiriladi).
+    #
+    # vad_filter=True — jimlik/faqat musiqa bo'lgan qismlarni o'tkazib
+    # yuboradi (aks holda Whisper bunday joylarda "gallyutsinatsiya"
+    # qilib, mavjud bo'lmagan matn to'qib chiqarishi mumkin).
+    segments_gen, info = model.transcribe(
+        str(audio_path),
+        language="uz",
+        task="transcribe",
+        beam_size=5,
+        word_timestamps=True,
+        vad_filter=True,
+        condition_on_previous_text=False,
+        initial_prompt="Quyida o'zbek tilidagi nutq matnga o'girilgan.",
+    )
     segments = list(segments_gen)
 
     if not segments:
@@ -261,12 +280,49 @@ def format_timestamp(seconds: float) -> str:
     return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
 
+def group_words_into_lines(segments, max_words: int = 5, max_chars: int = 42, max_duration: float = 4.0):
+    """Whisper'ning so'z darajasidagi vaqt belgilaridan (word_timestamps=True
+    bilan olingan) qisqa subtitr qatorlarini yasaydi — har birida bir necha
+    so'z, uzoq jumlalar bitta katta blok bo'lib chiqmasligi uchun."""
+    lines = []
+    current_words = []
+    current_start = None
+
+    for segment in segments:
+        words = getattr(segment, "words", None) or []
+        for word in words:
+            if current_start is None:
+                current_start = word.start
+            current_words.append(word)
+
+            text_so_far = "".join(w.word for w in current_words).strip()
+            duration = word.end - current_start
+
+            if (
+                len(current_words) >= max_words
+                or len(text_so_far) >= max_chars
+                or duration >= max_duration
+            ):
+                lines.append((current_start, word.end, text_so_far))
+                current_words = []
+                current_start = None
+
+    if current_words:
+        text_so_far = "".join(w.word for w in current_words).strip()
+        lines.append((current_start, current_words[-1].end, text_so_far))
+
+    return lines
+
+
 def write_srt(segments, path: Path):
     lines = []
-    for i, seg in enumerate(segments, start=1):
+    entries = group_words_into_lines(segments)
+    for i, (start, end, text) in enumerate(entries, start=1):
+        if not text:
+            continue
         lines.append(str(i))
-        lines.append(f"{format_timestamp(seg.start)} --> {format_timestamp(seg.end)}")
-        lines.append(seg.text.strip())
+        lines.append(f"{format_timestamp(start)} --> {format_timestamp(end)}")
+        lines.append(text)
         lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
 
