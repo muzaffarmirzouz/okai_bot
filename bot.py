@@ -15,6 +15,7 @@ BUYRUQLAR / FUNKSIYALAR:
   /menu            — rejimni istalgan vaqtda qayta tanlash
   /clone           — o'z ovozingizni klonlash (ovozli xabar namunasi orqali)
   /default         — standart ovozga qaytish (klonlangan ovozdan voz kechish)
+  /caption         — video/Instagram linkiga o'zbekcha titr (hardsub) qo'shish
   "🔊 Textni audio qilish" rejimida — matn ovozga aylantiriladi (mp3 fayl)
   "🎬 Video tarjima" rejimida — YouTube/TikTok linki (2 daqiqagacha) o'zbek
                      tiliga dublyaj qilinadi; undan uzun videolar rad etiladi
@@ -52,6 +53,10 @@ Text-to-Speech (ovoz generatsiyasi) uchun ishlatiladi. Whisper modeli hajmini
 WHISPER_MODEL_SIZE o'zgaruvchisi orqali sozlash mumkin (standart: "base";
 kichikroq/tezroq uchun "tiny", sifatliroq uchun "small" — Railway serveri
 resurslariga qarab tanlang).
+
+ESLATMA 5: /caption rejimi (caption_mode.py) shu Whisper modelini qayta
+ishlatadi (pastdagi _get_whisper_model() orqali) — alohida ikkinchi model
+yuklanmaydi, shu bilan server resursini tejaydi.
 """
 import asyncio
 import base64
@@ -104,6 +109,13 @@ from aiogram.types import (
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest
+
+# /caption rejimi — video/Instagram linkiga o'zbekcha titr (hardsub) qo'shadi.
+# MUHIM: bu quyidagi `router`dan OLDIN include qilinishi shart (pastdagi
+# main() funksiyasiga qarang) — aks holda `router`dagi
+# "noma'lum buyruqlarni yutuvchi" handler /caption'ni ushlab, hech narsa
+# qilmay jim qoladi.
+from caption_mode import caption_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("akoai-bot")
@@ -315,7 +327,11 @@ _whisper_model_lock = threading.Lock()
 
 def _get_whisper_model():
     """Whisper modelini birinchi chaqiruvda yuklaydi va keyingi chaqiruvlar
-    uchun xotirada saqlaydi (qayta-qayta yuklamaslik uchun)."""
+    uchun xotirada saqlaydi (qayta-qayta yuklamaslik uchun).
+
+    ESLATMA: /caption rejimi (caption_mode.py) ham aynan shu funksiyani
+    chaqiradi — shu bilan ikkita alohida Whisper modeli birga xotirada
+    turib qolmaydi."""
     global _whisper_model
     if _whisper_model is None:
         with _whisper_model_lock:
@@ -338,8 +354,8 @@ def _transcribe_video_sync(file_path: str) -> tuple[str, str]:
     matnga aylantiradi (bloklaydigan/sinxron — alohida threadda ishga
     tushiriladi). Matn va Whisper aniqlagan manba til kodini (masalan "en",
     "ru") qaytaradi — til kodi keyinchalik tarjima bosqichiga uzatiladi,
-    chunki MyMemory tarjima xizmati "auto" (avtomatik aniqlash) manba tilini
-    QABUL QILMAYDI, aniq til kodi talab qiladi.
+    chunki MyMemory tarjima xizmati "auto" (avtomatik aniqlash) manba
+    tilini QABUL QILMAYDI, aniq til kodi talab qiladi.
     ESLATMA: bu yerga faqat AUDIO fayl (mp3) berilishi kerak, video emas —
     _extract_audio_sync orqali oldindan ajratib olinadi.
     ESLATMA 2: avval bu yerda ElevenLabs Speech-to-Text ishlatilgan edi
@@ -942,6 +958,12 @@ async def handle_text(message: Message, bot: Bot):
 async def main():
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=None))
     dp = Dispatcher()
+
+    # MUHIM: caption_router `router`dan OLDIN include qilinishi shart.
+    # Aks holda pastdagi `router`dagi "noma'lum buyruqlarni yutuvchi"
+    # (ignore_unknown_commands, F.text.startswith("/")) handler /caption
+    # buyrug'ini birinchi bo'lib ushlab, hech narsa qilmay jim qoladi.
+    dp.include_router(caption_router)
     dp.include_router(router)
 
     await bot.set_my_commands([
@@ -949,6 +971,7 @@ async def main():
         BotCommand(command="menu", description="Rejimni tanlash (Text/Video)"),
         BotCommand(command="clone", description="O'z ovozingizni klonlash"),
         BotCommand(command="default", description="Standart ovozga qaytish"),
+        BotCommand(command="caption", description="Videoga o'zbekcha titr qo'shish"),
     ])
 
     log.info("AkoAI bot ishga tushmoqda...")
