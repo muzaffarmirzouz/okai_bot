@@ -14,8 +14,9 @@ BUYRUQLAR / FUNKSIYALAR:
   /start           — botni ishga tushirish, rejim tanlash tugmalari chiqadi
   /menu            — rejimni istalgan vaqtda qayta tanlash
   /clone           — o'z ovozingizni klonlash (ovozli xabar namunasi orqali)
-  /default         — standart ovozga qaytish (klonlangan ovozdan voz kechish)
-  /caption         — video/Instagram linkiga o'zbekcha titr (hardsub) qo'shish
+  /ovoz            — matn qaysi ovozda o'qilishini tanlash (standart / o'z
+                     klon ovozi / EXTRA_VOICES'da qo'shilgan boshqa ovozlar)
+  /default         — standart ovozga qaytish (tanlangan ovozdan voz kechish)
   "🔊 Textni audio qilish" rejimida — matn ovozga aylantiriladi (mp3 fayl)
   "🎬 Video tarjima" rejimida — YouTube/TikTok linki (2 daqiqagacha) o'zbek
                      tiliga dublyaj qilinadi; undan uzun videolar rad etiladi
@@ -24,13 +25,19 @@ ENV VARIABLES (Railway -> Variables):
   BOT_TOKEN            — @BotFather bergan token
   ELEVENLABS_API_KEY   — ElevenLabs'dan olingan API kalit
   ELEVENLABS_VOICE_ID  — standart ovozning ID'si (Voice Library'dan olinadi)
+  EXTRA_VOICES         — (ixtiyoriy) /ovoz menyusida ko'rsatiladigan qo'shimcha
+                     ("boshqa odam") ovozlari. Format:
+                     "Ism1:voice_id1|Ism2:voice_id2" — har bir ElevenLabs
+                     Voice Library'dagi ovoz uchun ism va voice_id'ni shu
+                     ko'rinishda joylang (masalan: "Aziz:ab12cd34|Malika:ef56gh78")
 
 MUHIM: Botni @Namanganliklar_uz kanaliga ADMIN qilib qo'shish kerak,
 aks holda obunani tekshirish ishlamaydi (Telegram talabi shunday).
 
-ESLATMA 1: Klonlangan ovozlar user_voices.json fayliga saqlanadi. Railway'ning
-standart (persistent bo'lmagan) diskida bu fayl har yangi deploy'da o'chib
-ketishi mumkin — doimiy saqlash kerak bo'lsa, Railway Volume ulash tavsiya etiladi.
+ESLATMA 1: Foydalanuvchilarning faol ovoz tanlovi user_voices.json, klonlangan
+ovozlari esa user_clones.json fayliga saqlanadi. Railway'ning standart
+(persistent bo'lmagan) diskida bu fayllar har yangi deploy'da o'chib ketishi
+mumkin — doimiy saqlash kerak bo'lsa, Railway Volume ulash tavsiya etiladi.
 
 ESLATMA 2: ElevenLabs'ning tayyor Dubbing API'si o'zbek tilini target sifatida
 QO'LLAB-QUVVATLAMAYDI ("Target language 'uz' is not supported"). Shuning uchun
@@ -53,10 +60,6 @@ Text-to-Speech (ovoz generatsiyasi) uchun ishlatiladi. Whisper modeli hajmini
 WHISPER_MODEL_SIZE o'zgaruvchisi orqali sozlash mumkin (standart: "base";
 kichikroq/tezroq uchun "tiny", sifatliroq uchun "small" — Railway serveri
 resurslariga qarab tanlang).
-
-ESLATMA 5: /caption rejimi (caption_mode.py) shu Whisper modelini qayta
-ishlatadi (pastdagi _get_whisper_model() orqali) — alohida ikkinchi model
-yuklanmaydi, shu bilan server resursini tejaydi.
 """
 import asyncio
 import base64
@@ -109,13 +112,6 @@ from aiogram.types import (
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest
-
-# /caption rejimi — video/Instagram linkiga o'zbekcha titr (hardsub) qo'shadi.
-# MUHIM: bu quyidagi `router`dan OLDIN include qilinishi shart (pastdagi
-# main() funksiyasiga qarang) — aks holda `router`dagi
-# "noma'lum buyruqlarni yutuvchi" handler /caption'ni ushlab, hech narsa
-# qilmay jim qoladi.
-from caption_mode import caption_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("akoai-bot")
@@ -179,8 +175,48 @@ MAX_CHARS = 2800
 # barqaror). O'rnatilmagan bo'lsa, eski (kamroq ishonchli) bepul usulga qaytadi.
 GOOGLE_TRANSLATE_API_KEY = os.environ.get("GOOGLE_TRANSLATE_API_KEY", "").strip()
 
-# Klonlangan ovozlar: {"<user_id>": "<voice_id>"} ko'rinishida saqlanadi
+# Foydalanuvchi uchun HOZIR faol (tanlangan) ovoz: {"<user_id>": "<voice_id>"}
+# ko'rinishida saqlanadi. Bu yerga klonlangan ovoz ham, quyidagi EXTRA_VOICES
+# ro'yxatidan tanlangan "boshqa odam" ovozi ham yozilishi mumkin — ikkalasi
+# ham xuddi shu mexanizm orqali ishlaydi (do_tts shunchaki shu yerdan o'qiydi).
 USER_VOICES_FILE = "user_voices.json"
+
+# Foydalanuvchining o'ziga tegishli klonlangan ovozi DOIMIY saqlanadi (u boshqa
+# ovozga o'tib qaytadan /clone qilmasdan orqaga qaytishi uchun):
+# {"<user_id>": "<voice_id>"}
+USER_CLONES_FILE = "user_clones.json"
+
+# ESLATMA: Botga oldindan tayyorlangan, boshqa odamlarning (yoki turli xil
+# uslubdagi) ElevenLabs ovozlarini qo'shish uchun Railway Variable sifatida
+# EXTRA_VOICES o'rnatiladi. Format: "Ism1:voice_id1|Ism2:voice_id2|..."
+# (har bir juftlik "|" bilan, ism va voice_id ":" bilan ajratiladi). voice_id
+# ElevenLabs Voice Library'dagi ovozning ID'si. O'rnatilmasa yoki format
+# noto'g'ri bo'lsa, bot yiqilmaydi — shunchaki qo'shimcha ovozlar ro'yxati
+# bo'sh bo'ladi (standart ovoz va ovoz klonlash odatdagidek ishlayveradi).
+EXTRA_VOICES_RAW = os.environ.get("EXTRA_VOICES", "").strip()
+
+
+def _load_extra_voices() -> list[tuple[str, str]]:
+    voices: list[tuple[str, str]] = []
+    if not EXTRA_VOICES_RAW:
+        return voices
+    for entry in EXTRA_VOICES_RAW.split("|"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if ":" not in entry:
+            _log.warning(f"EXTRA_VOICES'dagi noto'g'ri format e'tiborga olinmadi: {entry!r}")
+            continue
+        name, voice_id = entry.split(":", 1)
+        name, voice_id = name.strip(), voice_id.strip()
+        if not name or not voice_id:
+            _log.warning(f"EXTRA_VOICES'dagi bo'sh ism/ID e'tiborga olinmadi: {entry!r}")
+            continue
+        voices.append((name, voice_id))
+    return voices
+
+
+EXTRA_VOICES: list[tuple[str, str]] = _load_extra_voices()
 
 router = Router()
 
@@ -192,22 +228,42 @@ pending_clone: set[int] = set()
 user_mode: dict[int, str] = {}
 
 
-def load_user_voices() -> dict:
-    if os.path.exists(USER_VOICES_FILE):
+def _load_json_dict(path: str) -> dict:
+    if os.path.exists(path):
         try:
-            with open(USER_VOICES_FILE, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return {}
     return {}
 
 
-def save_user_voices(data: dict) -> None:
-    with open(USER_VOICES_FILE, "w", encoding="utf-8") as f:
+def _save_json_dict(path: str, data: dict) -> None:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f)
 
 
+def load_user_voices() -> dict:
+    return _load_json_dict(USER_VOICES_FILE)
+
+
+def save_user_voices(data: dict) -> None:
+    _save_json_dict(USER_VOICES_FILE, data)
+
+
+def load_user_clones() -> dict:
+    return _load_json_dict(USER_CLONES_FILE)
+
+
+def save_user_clones(data: dict) -> None:
+    _save_json_dict(USER_CLONES_FILE, data)
+
+
+# HOZIR faol ovoz (klon yoki EXTRA_VOICES'dan tanlangan) — do_tts shu yerdan o'qiydi.
 user_voices = load_user_voices()
+# Foydalanuvchining o'ziga tegishli klonlangan ovozi (doimiy, boshqa ovozga
+# o'tib qaytadan /clone qilmasdan qaytish uchun).
+user_clones = load_user_clones()
 
 
 def _generate_speech_sync(text: str, voice_id: str) -> bytes:
@@ -327,11 +383,7 @@ _whisper_model_lock = threading.Lock()
 
 def _get_whisper_model():
     """Whisper modelini birinchi chaqiruvda yuklaydi va keyingi chaqiruvlar
-    uchun xotirada saqlaydi (qayta-qayta yuklamaslik uchun).
-
-    ESLATMA: /caption rejimi (caption_mode.py) ham aynan shu funksiyani
-    chaqiradi — shu bilan ikkita alohida Whisper modeli birga xotirada
-    turib qolmaydi."""
+    uchun xotirada saqlaydi (qayta-qayta yuklamaslik uchun)."""
     global _whisper_model
     if _whisper_model is None:
         with _whisper_model_lock:
@@ -354,8 +406,8 @@ def _transcribe_video_sync(file_path: str) -> tuple[str, str]:
     matnga aylantiradi (bloklaydigan/sinxron — alohida threadda ishga
     tushiriladi). Matn va Whisper aniqlagan manba til kodini (masalan "en",
     "ru") qaytaradi — til kodi keyinchalik tarjima bosqichiga uzatiladi,
-    chunki MyMemory tarjima xizmati "auto" (avtomatik aniqlash) manba
-    tilini QABUL QILMAYDI, aniq til kodi talab qiladi.
+    chunki MyMemory tarjima xizmati "auto" (avtomatik aniqlash) manba tilini
+    QABUL QILMAYDI, aniq til kodi talab qiladi.
     ESLATMA: bu yerga faqat AUDIO fayl (mp3) berilishi kerak, video emas —
     _extract_audio_sync orqali oldindan ajratib olinadi.
     ESLATMA 2: avval bu yerda ElevenLabs Speech-to-Text ishlatilgan edi
@@ -625,11 +677,10 @@ SUBSCRIBE_TEXT = (
 
 WELCOME_TEXT = (
     "\U0001F916 AkoAI botiga xush kelibsiz!\n\n"
-    "Men uch xil ishni qila olaman:\n"
+    "Men ikki xil ishni qila olaman:\n"
     "\U0001F50A Textni audio qilish — matningizni mp3 ovozga aylantiraman.\n"
     "\U0001F3AC Video tarjima — YouTube/TikTok videosini o'zbek tiliga dublyaj qilaman "
-    f"({DUBBING_MAX_SECONDS // 60} daqiqagacha bo'lgan videolar uchun).\n"
-    "\U0001F4DD Videoga text yozish — video yoki Instagram linkiga o'zbekcha titr qo'shaman.\n\n"
+    f"({DUBBING_MAX_SECONDS // 60} daqiqagacha bo'lgan videolar uchun).\n\n"
     "Quyidan kerakli rejimni tanlang \U0001F447"
 )
 
@@ -637,7 +688,8 @@ MODE_TTS_TEXT = (
     "\U0001F50A Rejim: Textni audio qilish\n\n"
     "Menga istalgan matnni yozing, men uni mp3 audio fayl qilib qaytaraman.\n"
     f"Bir martada {MAX_CHARS} belgigacha matn qabul qilaman.\n\n"
-    "\U0001F3A4 O'z ovozingizda gapirtirishni xohlasangiz — /clone buyrug'ini yuboring.\n\n"
+    "\U0001F3A4 O'z ovozingizda gapirtirishni xohlasangiz — /clone buyrug'ini yuboring.\n"
+    "\U0001F3AD Boshqa ovozlardan birini tanlamoqchi bo'lsangiz — /ovoz buyrug'ini yuboring.\n\n"
     "Boshqa rejimga o'tish uchun /menu buyrug'ini yuboring."
 )
 
@@ -656,7 +708,6 @@ def mode_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="\U0001F50A Textni audio qilish", callback_data="mode_tts")],
             [InlineKeyboardButton(text="\U0001F3AC Video tarjima", callback_data="mode_dub")],
-            [InlineKeyboardButton(text="\U0001F4DD Videoga text yozish", callback_data="mode_caption")],
         ]
     )
 
@@ -719,20 +770,108 @@ async def cmd_clone(message: Message, bot: Bot):
 
 @router.message(F.text == "/default")
 async def cmd_default(message: Message):
-    had_clone = user_voices.pop(str(message.from_user.id), None) is not None
+    had_custom = user_voices.pop(str(message.from_user.id), None) is not None
     save_user_voices(user_voices)
-    if had_clone:
+    if had_custom:
         await message.answer(
             "\U0001F501 Standart ovozga qaytdingiz.\n\n"
             "ℹ️ Bot qanday ishlaydi: bundan buyon yuborgan matningiz standart "
             "(bot o'zining odatiy) ovozida audio qilib qaytariladi. "
-            "Xohlagan vaqtingizda /clone buyrug'i orqali qayta o'z ovozingizga o'tishingiz mumkin."
+            "Boshqa ovozni tanlash uchun /ovoz, o'z ovozingizga qaytish uchun /clone "
+            "buyrug'ini yuboring."
         )
     else:
         await message.answer(
-            "ℹ️ Siz hozir ham standart ovozdasiz — klonlangan ovoz ulanmagan edi.\n\n"
-            "O'z ovozingizda gapirtirish uchun /clone buyrug'ini yuboring."
+            "ℹ️ Siz hozir ham standart ovozdasiz — boshqa ovoz ulanmagan edi.\n\n"
+            "Ovoz tanlash uchun /ovoz, o'z ovozingizda gapirtirish uchun /clone "
+            "buyrug'ini yuboring."
         )
+
+
+def ovoz_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Foydalanuvchi uchun ovoz tanlash tugmalarini yasaydi. Hozir faol
+    tanlangan ovoz oldiga ✅ belgisi qo'yiladi."""
+    current = user_voices.get(str(user_id))
+    clone_id = user_clones.get(str(user_id))
+
+    rows: list[list[InlineKeyboardButton]] = []
+
+    default_mark = "✅ " if current is None else ""
+    rows.append([
+        InlineKeyboardButton(text=f"{default_mark}\U0001F50A Standart ovoz", callback_data="voice:default")
+    ])
+
+    if clone_id:
+        clone_mark = "✅ " if current == clone_id else ""
+        rows.append([
+            InlineKeyboardButton(text=f"{clone_mark}\U0001F9D1 Mening ovozim (klon)", callback_data="voice:clone")
+        ])
+
+    for idx, (name, voice_id) in enumerate(EXTRA_VOICES):
+        mark = "✅ " if current == voice_id else ""
+        rows.append([
+            InlineKeyboardButton(text=f"{mark}\U0001F3AD {name}", callback_data=f"voice:extra:{idx}")
+        ])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(F.text == "/ovoz")
+async def cmd_ovoz(message: Message, bot: Bot):
+    if not await is_subscribed(bot, message.from_user.id):
+        await message.answer(SUBSCRIBE_TEXT, reply_markup=subscribe_keyboard())
+        return
+
+    if not EXTRA_VOICES and not user_clones.get(str(message.from_user.id)):
+        await message.answer(
+            "\U0001F3A4 Hozircha faqat standart ovoz mavjud.\n\n"
+            "O'z ovozingizni qo'shish uchun /clone buyrug'ini yuboring."
+        )
+        return
+
+    await message.answer(
+        "\U0001F3AD Matn qaysi ovozda o'qilishini tanlang:",
+        reply_markup=ovoz_keyboard(message.from_user.id),
+    )
+
+
+@router.callback_query(F.data.startswith("voice:"))
+async def set_voice_callback(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    choice = callback.data.split(":", 1)[1]  # "default" | "clone" | "extra:<idx>"
+
+    if choice == "default":
+        user_voices.pop(str(user_id), None)
+        chosen_label = "🔊 Standart ovoz"
+    elif choice == "clone":
+        clone_id = user_clones.get(str(user_id))
+        if not clone_id:
+            await callback.answer(
+                "❌ Sizda klonlangan ovoz yo'q. Avval /clone buyrug'ini yuboring.",
+                show_alert=True,
+            )
+            return
+        user_voices[str(user_id)] = clone_id
+        chosen_label = "🧑 Sizning ovozingiz"
+    elif choice.startswith("extra:"):
+        try:
+            idx = int(choice.split(":", 1)[1])
+            name, voice_id = EXTRA_VOICES[idx]
+        except (ValueError, IndexError):
+            await callback.answer("❌ Bu ovoz endi mavjud emas.", show_alert=True)
+            return
+        user_voices[str(user_id)] = voice_id
+        chosen_label = f"🎭 {name}"
+    else:
+        await callback.answer()
+        return
+
+    save_user_voices(user_voices)
+    await callback.message.edit_text(
+        "\U0001F3AD Matn qaysi ovozda o'qilishini tanlang:",
+        reply_markup=ovoz_keyboard(user_id),
+    )
+    await callback.answer(f"✅ Tanlandi: {chosen_label}")
 
 
 @router.message(F.text.startswith("/"))
@@ -765,11 +904,14 @@ async def handle_voice_sample(message: Message, bot: Bot):
         )
         user_voices[str(user_id)] = voice_id
         save_user_voices(user_voices)
+        user_clones[str(user_id)] = voice_id
+        save_user_clones(user_clones)
 
         await status.edit_text(
             "✅ Ovozingiz muvaffaqiyatli klonlandi!\n\n"
             "Endi menga yuborgan har qanday matn shu ovozda o'qiladi.\n"
-            "Standart ovozga qaytish uchun /default buyrug'ini yuboring."
+            "Standart ovozga qaytish uchun /default, boshqa ovozlarni ko'rish uchun "
+            "/ovoz buyrug'ini yuboring."
         )
     except asyncio.TimeoutError:
         await status.edit_text("❌ Vaqt tugadi, qaytadan /clone buyrug'ini yuborib urinib ko'ring.")
@@ -960,12 +1102,6 @@ async def handle_text(message: Message, bot: Bot):
 async def main():
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=None))
     dp = Dispatcher()
-
-    # MUHIM: caption_router `router`dan OLDIN include qilinishi shart.
-    # Aks holda pastdagi `router`dagi "noma'lum buyruqlarni yutuvchi"
-    # (ignore_unknown_commands, F.text.startswith("/")) handler /caption
-    # buyrug'ini birinchi bo'lib ushlab, hech narsa qilmay jim qoladi.
-    dp.include_router(caption_router)
     dp.include_router(router)
 
     await bot.set_my_commands([
@@ -973,7 +1109,6 @@ async def main():
         BotCommand(command="menu", description="Rejimni tanlash (Text/Video)"),
         BotCommand(command="clone", description="O'z ovozingizni klonlash"),
         BotCommand(command="default", description="Standart ovozga qaytish"),
-        BotCommand(command="caption", description="Videoga o'zbekcha titr qo'shish"),
     ])
 
     log.info("AkoAI bot ishga tushmoqda...")
